@@ -466,7 +466,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		ctx := context.Background()
 
 		// Create 100 pipes
-		var pipes []Fitting[context.Context, *mockWriter, string]
+		var pipes []Pipe[context.Context, *mockWriter, string]
 		for i := 0; i < 100; i++ {
 			pipes = append(pipes, func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 				return next(ctx, w, input)

@@ -7,22 +7,22 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Fitting is a middleware function that processes writer and input.
+// Pipe is a middleware function that processes writer and input.
 // It receives a next function that invokes the next pipe in the chain.
 // The pipe can call next(ctx, writer, input) to continue the chain, or return early to short-circuit.
-type Fitting[C context.Context, W, I any] func(ctx C, writer W, input I, next Next[C, W, I]) error
+type Pipe[C context.Context, W, I any] func(ctx C, writer W, input I, next Next[C, W, I]) error
 type Next[C context.Context, W, I any] func(C, W, I) error
 
 // Pipeline chains multiple pipes together in a non-recursive middleware pattern.
 type Pipeline[C context.Context, W, I any] struct {
-	pipes    []Fitting[C, W, I]
+	pipes    []Pipe[C, W, I]
 	fittings []Next[C, W, I] // Pre-built next functions
 }
 
 // New creates a new pipeline with the given pipes.
 // Pipes are executed in order: pipe1 -> pipe2 -> pipe3 -> ...
 // Next functions are pre-built for efficiency.
-func New[C context.Context, W, I any](ctx C, pipes ...Fitting[C, W, I]) *Pipeline[C, W, I] {
+func New[C context.Context, W, I any](ctx C, pipes ...Pipe[C, W, I]) *Pipeline[C, W, I] {
 	p := &Pipeline[C, W, I]{
 		pipes: pipes,
 	}
@@ -85,7 +85,7 @@ func (p *Pipeline[C, W, I]) Execute(ctx C, writer W, input I) error {
 // Both left and right pipes receive the same writer and input,
 // execute in parallel, and both must complete before continuing.
 // If either branch returns an error, execution stops and the error is returned.
-func Wye[C context.Context, W, I any](left, right Fitting[C, W, I]) Fitting[C, W, I] {
+func Wye[C context.Context, W, I any](left, right Pipe[C, W, I]) Pipe[C, W, I] {
 	return func(ctx C, writer W, input I, next Next[C, W, I]) error {
 		g, _ := errgroup.WithContext(ctx)
 
