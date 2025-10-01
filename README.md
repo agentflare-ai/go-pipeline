@@ -8,7 +8,7 @@ Pipeline provides a flexible middleware pattern for chaining processing function
 
 ## Features
 
-- **Generic Types**: Type-safe pipeline with support for any writer (`W`) and input (`I`) types
+- **Generic Types**: Type-safe pipeline with support for any context (`C`), writer (`W`), and input (`I`) types
 - **Context Cancellation**: Full support for context-based cancellation at any pipeline stage
 - **Storage Pooling**: Built-in sync.Pool for efficient storage management across executions
 - **Non-Recursive**: Pre-built next functions eliminate stack depth concerns
@@ -44,7 +44,7 @@ func main() {
     ctx := context.Background()
     
     // Create pipeline with logging and processing pipes
-    p := pipeline.New[*Writer, string](ctx,
+    p := pipeline.New(ctx,
         // Logging pipe
         func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
             fmt.Println("Processing:", input)
@@ -73,13 +73,13 @@ func main() {
 A `Pipe` is a middleware function with the signature:
 
 ```go
-type Pipe[W, I any] func(ctx context.Context, writer W, input I, next func(context.Context, W, I) error) error
+type Pipe[C context.Context, W, I any] func(ctx C, writer W, input I, next func(C, W, I) error) error
 ```
 
 Each pipe receives:
-- `ctx`: Context for cancellation and storage
-- `writer`: The writer instance to operate on
-- `input`: The input data to process
+- `ctx`: Context for cancellation and storage (generic type `C` must satisfy `context.Context`)
+- `writer`: The writer instance to operate on (generic type `W`)
+- `input`: The input data to process (generic type `I`)
 - `next`: Function to invoke the next pipe in the chain
 
 ### Pipeline Execution
@@ -123,7 +123,7 @@ Storage is:
 ### Basic Chain
 
 ```go
-p := pipeline.New[*Writer, string](ctx,
+p := pipeline.New(ctx,
     func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
         w.Write("before")
         err := next(ctx, w, input)
@@ -161,7 +161,7 @@ p := pipeline.New(ctx, authPipe, processPipe)
 ### Input Transformation
 
 ```go
-p := pipeline.New[*Writer, string](ctx,
+p := pipeline.New(ctx,
     func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
         // Transform and pass modified input
         return next(ctx, w, strings.ToUpper(input))
@@ -178,7 +178,7 @@ p := pipeline.New[*Writer, string](ctx,
 ```go
 ctx, cancel := context.WithCancel(context.Background())
 
-p := pipeline.New[*Writer, string](ctx,
+p := pipeline.New(ctx,
     func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
         w.Write("started")
         cancel() // Cancel context
@@ -215,7 +215,7 @@ BenchmarkPipeline_Storage-8    3000000    420 ns/op    0 allocs/op
 Errors propagate up through the chain:
 
 ```go
-p := pipeline.New[*Writer, string](ctx,
+p := pipeline.New(ctx,
     func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
         w.Write("before")
         err := next(ctx, w, input)
