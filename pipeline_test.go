@@ -25,9 +25,7 @@ func TestNew(t *testing.T) {
 		if p == nil {
 			t.Fatal("expected non-nil pipeline")
 		}
-		if p.Context() != ctx {
-			t.Error("context not set correctly")
-		}
+
 		if len(p.pipes) != 0 {
 			t.Errorf("expected 0 pipes, got %d", len(p.pipes))
 		}
@@ -35,7 +33,7 @@ func TestNew(t *testing.T) {
 
 	t.Run("single pipe", func(t *testing.T) {
 		ctx := context.Background()
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return nil
 		}
 
@@ -51,13 +49,13 @@ func TestNew(t *testing.T) {
 
 	t.Run("multiple pipes", func(t *testing.T) {
 		ctx := context.Background()
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return nil
 		}
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return nil
 		}
-		pipe3 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe3 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return nil
 		}
 
@@ -76,7 +74,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New[context.Context, *mockWriter, string](ctx)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -86,7 +84,7 @@ func TestPipeline_Execute(t *testing.T) {
 		ctx := context.Background()
 		executed := false
 
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			executed = true
 			w.Write(input)
 			return nil
@@ -95,7 +93,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New(ctx, pipe)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "hello")
+		err := p.Execute(ctx, w, "hello")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -110,21 +108,21 @@ func TestPipeline_Execute(t *testing.T) {
 	t.Run("multiple pipes in order", func(t *testing.T) {
 		ctx := context.Background()
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe1-before")
 			err := next(ctx, w, input)
 			w.Write("pipe1-after")
 			return err
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe2-before")
 			err := next(ctx, w, input)
 			w.Write("pipe2-after")
 			return err
 		}
 
-		pipe3 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe3 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe3")
 			return nil
 		}
@@ -132,7 +130,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New(ctx, pipe1, pipe2, pipe3)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -151,13 +149,13 @@ func TestPipeline_Execute(t *testing.T) {
 	t.Run("short circuit without calling next", func(t *testing.T) {
 		ctx := context.Background()
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe1")
 			// Don't call next, short-circuit
 			return nil
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe2")
 			return nil
 		}
@@ -165,7 +163,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New(ctx, pipe1, pipe2)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -179,14 +177,14 @@ func TestPipeline_Execute(t *testing.T) {
 		ctx := context.Background()
 		expectedErr := errors.New("test error")
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe1")
 			err := next(ctx, w, input)
 			w.Write("pipe1-after")
 			return err
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe2")
 			return expectedErr
 		}
@@ -194,7 +192,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New(ctx, pipe1, pipe2)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != expectedErr {
 			t.Errorf("expected error %v, got %v", expectedErr, err)
 		}
@@ -210,11 +208,11 @@ func TestPipeline_Execute(t *testing.T) {
 		ctx := context.Background()
 		expectedErr := errors.New("first pipe error")
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return expectedErr
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe2")
 			return nil
 		}
@@ -222,7 +220,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New(ctx, pipe1, pipe2)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != expectedErr {
 			t.Errorf("expected error %v, got %v", expectedErr, err)
 		}
@@ -235,17 +233,17 @@ func TestPipeline_Execute(t *testing.T) {
 	t.Run("input transformation through pipes", func(t *testing.T) {
 		ctx := context.Background()
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			// Transform input before passing to next
 			return next(ctx, w, input+" modified1")
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			// Transform input before passing to next
 			return next(ctx, w, input+" modified2")
 		}
 
-		pipe3 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe3 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write(input)
 			return nil
 		}
@@ -253,7 +251,7 @@ func TestPipeline_Execute(t *testing.T) {
 		p := New(ctx, pipe1, pipe2, pipe3)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "original")
+		err := p.Execute(ctx, w, "original")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -270,21 +268,24 @@ func TestPipeline_Context(t *testing.T) {
 	t.Run("returns stored context", func(t *testing.T) {
 		ctx := context.Background()
 		p := New[context.Context, *mockWriter, string](ctx)
-
-		if p.Context() != ctx {
-			t.Error("Context() should return the stored context")
+		w := &mockWriter{}
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
 		}
 	})
 
 	t.Run("returns todo context", func(t *testing.T) {
 		ctx := context.TODO()
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return nil
 		}
 
 		p := New[context.Context, *mockWriter, string](ctx, pipe)
-		if p.Context() != ctx {
-			t.Error("Context() should return TODO context")
+		w := &mockWriter{}
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
 		}
 	})
 }
@@ -292,7 +293,7 @@ func TestPipeline_Context(t *testing.T) {
 // Test edge cases
 func TestPipeline_EdgeCases(t *testing.T) {
 	t.Run("todo context", func(t *testing.T) {
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			return nil
 		}
 
@@ -302,7 +303,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 			t.Error("expected non-nil pipeline")
 		}
 		w := &mockWriter{}
-		err := p.Execute(w, "test")
+		err := p.Execute(context.TODO(), w, "test")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -311,7 +312,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 	t.Run("context cancellation before execution", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("should not execute")
 			return next(ctx, w, input)
 		}
@@ -322,7 +323,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		// Cancel before execution
 		cancel()
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != context.Canceled {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
@@ -336,19 +337,19 @@ func TestPipeline_EdgeCases(t *testing.T) {
 	t.Run("context cancellation during execution", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe1")
 			// Cancel context after first pipe
 			cancel()
 			return next(ctx, w, input)
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe2-should-not-execute")
 			return next(ctx, w, input)
 		}
 
-		pipe3 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe3 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe3-should-not-execute")
 			return nil
 		}
@@ -356,7 +357,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		p := New(ctx, pipe1, pipe2, pipe3)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != context.Canceled {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
@@ -371,7 +372,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 0) // Already expired
 		defer cancel()
 
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("should not execute")
 			return next(ctx, w, input)
 		}
@@ -379,7 +380,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		p := New(ctx, pipe)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != context.DeadlineExceeded {
 			t.Errorf("expected context.DeadlineExceeded, got %v", err)
 		}
@@ -393,20 +394,20 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe1-before")
 			err := next(ctx, w, input)
 			w.Write("pipe1-after")
 			return err
 		}
 
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe2")
 			cancel() // Cancel here
 			return next(ctx, w, input)
 		}
 
-		pipe3 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe3 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write("pipe3-should-not-execute")
 			return nil
 		}
@@ -414,7 +415,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		p := New(ctx, pipe1, pipe2, pipe3)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != context.Canceled {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
@@ -434,7 +435,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 	t.Run("concurrent execution", func(t *testing.T) {
 		ctx := context.Background()
 
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write(input)
 			return next(ctx, w, input)
 		}
@@ -446,13 +447,13 @@ func TestPipeline_EdgeCases(t *testing.T) {
 
 		go func() {
 			w := &mockWriter{}
-			p.Execute(w, "goroutine1")
+			p.Execute(ctx, w, "goroutine1")
 			done <- true
 		}()
 
 		go func() {
 			w := &mockWriter{}
-			p.Execute(w, "goroutine2")
+			p.Execute(ctx, w, "goroutine2")
 			done <- true
 		}()
 
@@ -465,9 +466,9 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		ctx := context.Background()
 
 		// Create 100 pipes
-		var pipes []Pipe[context.Context, *mockWriter, string]
+		var pipes []Fitting[context.Context, *mockWriter, string]
 		for i := 0; i < 100; i++ {
-			pipes = append(pipes, func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+			pipes = append(pipes, func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 				return next(ctx, w, input)
 			})
 		}
@@ -475,7 +476,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		p := New[context.Context, *mockWriter, string](ctx, pipes...)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -493,7 +494,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 
 		ctx := context.Background()
 
-		pipe := func(ctx context.Context, w *complexWriter, input string, next func(context.Context, *complexWriter, string) error) error {
+		pipe := func(ctx context.Context, w *complexWriter, input string, next Next[context.Context, *complexWriter, string]) error {
 			w.builder.WriteString(input)
 			w.count++
 			return nil
@@ -502,7 +503,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		p := New(ctx, pipe)
 		w := &complexWriter{}
 
-		err := p.Execute(w, "test")
+		err := p.Execute(ctx, w, "test")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -518,7 +519,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 	t.Run("nil writer", func(t *testing.T) {
 		ctx := context.Background()
 
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			// Handle nil writer
 			if w == nil {
 				return errors.New("nil writer")
@@ -528,7 +529,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 
 		p := New(ctx, pipe)
 
-		err := p.Execute(nil, "test")
+		err := p.Execute(ctx, nil, "test")
 		if err == nil {
 			t.Error("expected error with nil writer")
 		}
@@ -537,7 +538,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
 		ctx := context.Background()
 
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+		pipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 			w.Write(input)
 			return nil
 		}
@@ -545,7 +546,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		p := New(ctx, pipe)
 		w := &mockWriter{}
 
-		err := p.Execute(w, "")
+		err := p.Execute(ctx, w, "")
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -560,13 +561,13 @@ func TestPipeline_EdgeCases(t *testing.T) {
 func BenchmarkPipeline_Execute(b *testing.B) {
 	ctx := context.Background()
 
-	pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+	pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 		return next(ctx, w, input)
 	}
-	pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+	pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 		return next(ctx, w, input)
 	}
-	pipe3 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
+	pipe3 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
 		w.Write(input)
 		return nil
 	}
@@ -576,6 +577,6 @@ func BenchmarkPipeline_Execute(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		w := &mockWriter{}
-		p.Execute(w, "benchmark")
+		p.Execute(ctx, w, "benchmark")
 	}
 }
