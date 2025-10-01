@@ -20,12 +20,12 @@ func (w *mockWriter) Write(s string) {
 func TestNew(t *testing.T) {
 	t.Run("empty pipeline", func(t *testing.T) {
 		ctx := context.Background()
-		p := New[*mockWriter, string](ctx)
+		p := New[context.Context, *mockWriter, string](ctx)
 
 		if p == nil {
 			t.Fatal("expected non-nil pipeline")
 		}
-		if p.baseCtx != ctx {
+		if p.Context() != ctx {
 			t.Error("context not set correctly")
 		}
 		if len(p.pipes) != 0 {
@@ -39,7 +39,7 @@ func TestNew(t *testing.T) {
 			return nil
 		}
 
-		p := New(ctx, pipe)
+		p := New[context.Context, *mockWriter, string](ctx, pipe)
 
 		if p == nil {
 			t.Fatal("expected non-nil pipeline")
@@ -73,7 +73,7 @@ func TestNew(t *testing.T) {
 func TestPipeline_Execute(t *testing.T) {
 	t.Run("empty pipeline", func(t *testing.T) {
 		ctx := context.Background()
-		p := New[*mockWriter, string](ctx)
+		p := New[context.Context, *mockWriter, string](ctx)
 		w := &mockWriter{}
 
 		err := p.Execute(w, "test")
@@ -265,187 +265,26 @@ func TestPipeline_Execute(t *testing.T) {
 	})
 }
 
-// Test storage functions
-func TestStorage(t *testing.T) {
-	t.Run("store and load within pipeline", func(t *testing.T) {
+// Test Context method
+func TestPipeline_Context(t *testing.T) {
+	t.Run("returns stored context", func(t *testing.T) {
 		ctx := context.Background()
+		p := New[context.Context, *mockWriter, string](ctx)
 
-		pipe1 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-			err := Store(ctx, "key1", "value1")
-			if err != nil {
-				return err
-			}
-			return next(ctx, w, input)
-		}
-
-		pipe2 := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-			val, ok := Load[string](ctx, "key1")
-			if !ok {
-				t.Error("failed to load key1")
-			}
-			if val != "value1" {
-				t.Errorf("expected 'value1', got %q", val)
-			}
-			w.Write(val)
-			return nil
-		}
-
-		p := New(ctx, pipe1, pipe2)
-		w := &mockWriter{}
-
-		err := p.Execute(w, "test")
-		if err != nil {
-			t.Errorf("expected no error, got %v", err)
-		}
-
-		if len(w.data) != 1 || w.data[0] != "value1" {
-			t.Errorf("expected ['value1'], got %v", w.data)
+		if p.Context() != ctx {
+			t.Error("Context() should return the stored context")
 		}
 	})
 
-	t.Run("store multiple values", func(t *testing.T) {
-		ctx := context.Background()
-
+	t.Run("returns todo context", func(t *testing.T) {
+		ctx := context.TODO()
 		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-			Store(ctx, "str", "hello")
-			Store(ctx, "int", 42)
-			Store(ctx, "bool", true)
-
-			str, ok := Load[string](ctx, "str")
-			if !ok || str != "hello" {
-				t.Errorf("expected 'hello', got %q (ok=%v)", str, ok)
-			}
-
-			num, ok := Load[int](ctx, "int")
-			if !ok || num != 42 {
-				t.Errorf("expected 42, got %d (ok=%v)", num, ok)
-			}
-
-			flag, ok := Load[bool](ctx, "bool")
-			if !ok || !flag {
-				t.Errorf("expected true, got %v (ok=%v)", flag, ok)
-			}
-
 			return nil
 		}
 
-		p := New(ctx, pipe)
-		w := &mockWriter{}
-
-		err := p.Execute(w, "test")
-		if err != nil {
-			t.Errorf("expected no error, got %v", err)
-		}
-	})
-
-	t.Run("load non-existent key", func(t *testing.T) {
-		ctx := context.Background()
-
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-			val, ok := Load[string](ctx, "nonexistent")
-			if ok {
-				t.Error("expected ok=false for non-existent key")
-			}
-			if val != "" {
-				t.Errorf("expected zero value, got %q", val)
-			}
-			return nil
-		}
-
-		p := New(ctx, pipe)
-		w := &mockWriter{}
-
-		err := p.Execute(w, "test")
-		if err != nil {
-			t.Errorf("expected no error, got %v", err)
-		}
-	})
-
-	t.Run("load wrong type", func(t *testing.T) {
-		ctx := context.Background()
-
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-			Store(ctx, "key", "string value")
-
-			// Try to load as int (wrong type)
-			val, ok := Load[int](ctx, "key")
-			if ok {
-				t.Error("expected ok=false when loading wrong type")
-			}
-			if val != 0 {
-				t.Errorf("expected zero value (0), got %d", val)
-			}
-			return nil
-		}
-
-		p := New(ctx, pipe)
-		w := &mockWriter{}
-
-		// This will panic due to type assertion, which is expected behavior
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("expected panic when loading wrong type")
-			}
-		}()
-
-		p.Execute(w, "test")
-	})
-
-	t.Run("store without storage context", func(t *testing.T) {
-		ctx := context.Background()
-
-		err := Store(ctx, "key", "value")
-		if err != ErrStorageNotFound {
-			t.Errorf("expected ErrStorageNotFound, got %v", err)
-		}
-	})
-
-	t.Run("load without storage context", func(t *testing.T) {
-		ctx := context.Background()
-
-		val, ok := Load[string](ctx, "key")
-		if ok {
-			t.Error("expected ok=false without storage context")
-		}
-		if val != "" {
-			t.Errorf("expected zero value, got %q", val)
-		}
-	})
-
-	t.Run("storage isolation between executions", func(t *testing.T) {
-		ctx := context.Background()
-
-		pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-			// Try to load from previous execution
-			val, ok := Load[string](ctx, "persistent")
-			if ok {
-				t.Error("storage should be isolated between executions")
-			}
-
-			// Store for this execution
-			Store(ctx, "persistent", input)
-
-			val, ok = Load[string](ctx, "persistent")
-			if !ok || val != input {
-				t.Errorf("expected %q, got %q (ok=%v)", input, val, ok)
-			}
-
-			return nil
-		}
-
-		p := New(ctx, pipe)
-		w := &mockWriter{}
-
-		// First execution
-		err := p.Execute(w, "exec1")
-		if err != nil {
-			t.Errorf("expected no error, got %v", err)
-		}
-
-		// Second execution should have clean storage
-		err = p.Execute(w, "exec2")
-		if err != nil {
-			t.Errorf("expected no error, got %v", err)
+		p := New[context.Context, *mockWriter, string](ctx, pipe)
+		if p.Context() != ctx {
+			t.Error("Context() should return TODO context")
 		}
 	})
 }
@@ -458,7 +297,7 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		}
 
 		// Should work with context.TODO()
-		p := New[*mockWriter, string](context.TODO(), pipe)
+		p := New[context.Context, *mockWriter, string](context.TODO(), pipe)
 		if p == nil {
 			t.Error("expected non-nil pipeline")
 		}
@@ -626,14 +465,14 @@ func TestPipeline_EdgeCases(t *testing.T) {
 		ctx := context.Background()
 
 		// Create 100 pipes
-		var pipes []Pipe[*mockWriter, string]
+		var pipes []Pipe[context.Context, *mockWriter, string]
 		for i := 0; i < 100; i++ {
 			pipes = append(pipes, func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
 				return next(ctx, w, input)
 			})
 		}
 
-		p := New(ctx, pipes...)
+		p := New[context.Context, *mockWriter, string](ctx, pipes...)
 		w := &mockWriter{}
 
 		err := p.Execute(w, "test")
@@ -733,25 +572,6 @@ func BenchmarkPipeline_Execute(b *testing.B) {
 	}
 
 	p := New(ctx, pipe1, pipe2, pipe3)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		w := &mockWriter{}
-		p.Execute(w, "benchmark")
-	}
-}
-
-func BenchmarkPipeline_Storage(b *testing.B) {
-	ctx := context.Background()
-
-	pipe := func(ctx context.Context, w *mockWriter, input string, next func(context.Context, *mockWriter, string) error) error {
-		Store(ctx, "key", input)
-		val, _ := Load[string](ctx, "key")
-		w.Write(val)
-		return nil
-	}
-
-	p := New(ctx, pipe)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
