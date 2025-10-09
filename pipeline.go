@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -86,15 +85,11 @@ func (p *Pipeline[C, W, I]) Process(ctx C, writer W, input I) error {
 
 	// Check if context is already cancelled before starting
 	if err := ctx.Err(); err != nil {
-		slog.Error("pipeline context cancelled", "error", err)
 		return err
 	}
 
 	// Execute the first pipe with pre-built next functions
 	err := p.pipes[0](ctx, writer, input, p.fittings[0])
-	if err != nil {
-		slog.Error("pipeline execution failed", "error", err)
-	}
 	return err
 }
 
