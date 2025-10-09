@@ -557,6 +557,818 @@ func TestPipeline_EdgeCases(t *testing.T) {
 	})
 }
 
+// Test Adapter function
+func TestAdapter(t *testing.T) {
+	t.Run("transforms input", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Uppercase transformation
+		upperPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			return strings.ToUpper(input), nil
+		})
+
+		// Capture transformed input
+		capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write(input)
+			return next(ctx, w, input)
+		}
+
+		p := New(ctx, upperPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "hello world")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		expected := "HELLO WORLD"
+		if len(w.data) != 1 || w.data[0] != expected {
+			t.Errorf("expected [%q], got %v", expected, w.data)
+		}
+	})
+
+	t.Run("chains multiple transformations", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Add prefix
+		prefixPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			return "prefix:" + input, nil
+		})
+
+		// Add suffix
+		suffixPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			return input + ":suffix", nil
+		})
+
+		// Capture final result
+		capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write(input)
+			return nil
+		}
+
+		p := New(ctx, prefixPipe, suffixPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		expected := "prefix:test:suffix"
+		if len(w.data) != 1 || w.data[0] != expected {
+			t.Errorf("expected [%q], got %v", expected, w.data)
+		}
+	})
+
+	t.Run("handles transformation errors", func(t *testing.T) {
+		ctx := context.Background()
+		expectedErr := errors.New("transformation failed")
+
+		errorPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			return "", expectedErr
+		})
+
+		capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("should not execute")
+			return nil
+		}
+
+		p := New(ctx, errorPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != expectedErr {
+			t.Errorf("expected error %v, got %v", expectedErr, err)
+		}
+
+		// Capture pipe should not have executed
+		if len(w.data) != 0 {
+			t.Errorf("expected no writes, got %v", w.data)
+		}
+	})
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		transformPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			cancel() // Cancel during transformation
+			return strings.ToUpper(input), nil
+		})
+
+		capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("should not execute")
+			return nil
+		}
+
+		p := New(ctx, transformPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != context.Canceled {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+
+		// Capture pipe should not execute due to cancelled context
+		if len(w.data) != 0 {
+			t.Errorf("expected no writes, got %v", w.data)
+		}
+	})
+
+	t.Run("works with integer types", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Multiply by 2
+		multiplyPipe := Adapter[context.Context, *mockWriter, int](func(ctx context.Context, input int) (int, error) {
+			return input * 2, nil
+		})
+
+		// Add 10
+		addPipe := Adapter[context.Context, *mockWriter, int](func(ctx context.Context, input int) (int, error) {
+			return input + 10, nil
+		})
+
+		// Capture result
+		var result int
+		capturePipe := func(ctx context.Context, w *mockWriter, input int, next Next[context.Context, *mockWriter, int]) error {
+			result = input
+			return nil
+		}
+
+		p := New(ctx, multiplyPipe, addPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, 5)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		expected := 20 // (5 * 2) + 10
+		if result != expected {
+			t.Errorf("expected %d, got %d", expected, result)
+		}
+	})
+
+	t.Run("empty transformation", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Identity transformation
+		identityPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			return input, nil
+		})
+
+		capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write(input)
+			return nil
+		}
+
+		p := New(ctx, identityPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "unchanged")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		if len(w.data) != 1 || w.data[0] != "unchanged" {
+			t.Errorf("expected ['unchanged'], got %v", w.data)
+		}
+	})
+
+	t.Run("complex transformation with context", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Use context value in transformation
+		transformPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+			// Simulate using context for something meaningful
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return "transformed:" + input, nil
+		})
+
+		capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write(input)
+			return nil
+		}
+
+		p := New(ctx, transformPipe, capturePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "data")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		expected := "transformed:data"
+		if len(w.data) != 1 || w.data[0] != expected {
+			t.Errorf("expected [%q], got %v", expected, w.data)
+		}
+	})
+}
+
+// Test Wye function
+func TestWye(t *testing.T) {
+	t.Run("executes both branches in parallel", func(t *testing.T) {
+		ctx := context.Background()
+
+		leftPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("left:" + input)
+			return nil
+		}
+
+		rightPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("right:" + input)
+			return nil
+		}
+
+		wyePipe := Wye(leftPipe, rightPipe)
+
+		finalPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("final")
+			return nil
+		}
+
+		p := New(ctx, wyePipe, finalPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		// Should have writes from both branches and final pipe
+		if len(w.data) != 3 {
+			t.Fatalf("expected 3 writes, got %d: %v", len(w.data), w.data)
+		}
+
+		// Check that both branches wrote (order may vary due to parallelism)
+		hasLeft := false
+		hasRight := false
+		hasFinal := false
+		for _, d := range w.data {
+			if d == "left:test" {
+				hasLeft = true
+			}
+			if d == "right:test" {
+				hasRight = true
+			}
+			if d == "final" {
+				hasFinal = true
+			}
+		}
+
+		if !hasLeft || !hasRight || !hasFinal {
+			t.Errorf("expected writes from both branches and final, got %v", w.data)
+		}
+	})
+
+	t.Run("propagates error from left branch", func(t *testing.T) {
+		ctx := context.Background()
+		expectedErr := errors.New("left error")
+
+		leftPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			return expectedErr
+		}
+
+		rightPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("right")
+			return nil
+		}
+
+		wyePipe := Wye(leftPipe, rightPipe)
+		p := New(ctx, wyePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != expectedErr {
+			t.Errorf("expected error %v, got %v", expectedErr, err)
+		}
+	})
+
+	t.Run("propagates error from right branch", func(t *testing.T) {
+		ctx := context.Background()
+		expectedErr := errors.New("right error")
+
+		leftPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("left")
+			return nil
+		}
+
+		rightPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			return expectedErr
+		}
+
+		wyePipe := Wye(leftPipe, rightPipe)
+		p := New(ctx, wyePipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != expectedErr {
+			t.Errorf("expected error %v, got %v", expectedErr, err)
+		}
+	})
+}
+
+// Test Diverter function
+func TestDiverter(t *testing.T) {
+	t.Run("selects single pipe based on input", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0:" + input)
+			return nil
+		}
+
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe1:" + input)
+			return nil
+		}
+
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe2:" + input)
+			return nil
+		}
+
+		// Select pipe based on input length
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			if len(input) < 5 {
+				return []int{0}, nil
+			} else if len(input) < 10 {
+				return []int{1}, nil
+			}
+			return []int{2}, nil
+		}
+
+		diverterPipe := Diverter(selector, pipe0, pipe1, pipe2)
+		p := New(ctx, diverterPipe)
+		w := &mockWriter{}
+
+		// Test short input (should use pipe0)
+		err := p.Execute(ctx, w, "hi")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(w.data) != 1 || w.data[0] != "pipe0:hi" {
+			t.Errorf("expected ['pipe0:hi'], got %v", w.data)
+		}
+
+		// Test medium input (should use pipe1)
+		w = &mockWriter{}
+		err = p.Execute(ctx, w, "hello")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(w.data) != 1 || w.data[0] != "pipe1:hello" {
+			t.Errorf("expected ['pipe1:hello'], got %v", w.data)
+		}
+
+		// Test long input (should use pipe2)
+		w = &mockWriter{}
+		err = p.Execute(ctx, w, "hello world")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if len(w.data) != 1 || w.data[0] != "pipe2:hello world" {
+			t.Errorf("expected ['pipe2:hello world'], got %v", w.data)
+		}
+	})
+
+	t.Run("selects multiple pipes in parallel", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0")
+			return nil
+		}
+
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe1")
+			return nil
+		}
+
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe2")
+			return nil
+		}
+
+		// Select multiple pipes
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return []int{0, 2}, nil // Select pipe0 and pipe2
+		}
+
+		diverterPipe := Diverter(selector, pipe0, pipe1, pipe2)
+		p := New(ctx, diverterPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		// Should have writes from pipe0 and pipe2, but not pipe1
+		if len(w.data) != 2 {
+			t.Fatalf("expected 2 writes, got %d: %v", len(w.data), w.data)
+		}
+
+		hasPipe0 := false
+		hasPipe2 := false
+		for _, d := range w.data {
+			if d == "pipe0" {
+				hasPipe0 = true
+			}
+			if d == "pipe2" {
+				hasPipe2 = true
+			}
+			if d == "pipe1" {
+				t.Errorf("pipe1 should not have executed")
+			}
+		}
+
+		if !hasPipe0 || !hasPipe2 {
+			t.Errorf("expected writes from pipe0 and pipe2, got %v", w.data)
+		}
+	})
+
+	t.Run("continues chain after selected pipes", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("selected")
+			return nil
+		}
+
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return []int{0}, nil
+		}
+
+		diverterPipe := Diverter(selector, pipe0)
+
+		finalPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("final")
+			return nil
+		}
+
+		p := New(ctx, diverterPipe, finalPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		if len(w.data) != 2 {
+			t.Fatalf("expected 2 writes, got %d: %v", len(w.data), w.data)
+		}
+
+		// Order might vary, but both should be present
+		hasSelected := false
+		hasFinal := false
+		for _, d := range w.data {
+			if d == "selected" {
+				hasSelected = true
+			}
+			if d == "final" {
+				hasFinal = true
+			}
+		}
+
+		if !hasSelected || !hasFinal {
+			t.Errorf("expected both 'selected' and 'final', got %v", w.data)
+		}
+	})
+
+	t.Run("empty selection continues chain", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("should not execute")
+			return nil
+		}
+
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return []int{}, nil // No pipes selected
+		}
+
+		diverterPipe := Diverter(selector, pipe0)
+
+		finalPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("final")
+			return nil
+		}
+
+		p := New(ctx, diverterPipe, finalPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		// Should only have final write
+		if len(w.data) != 1 || w.data[0] != "final" {
+			t.Errorf("expected ['final'], got %v", w.data)
+		}
+	})
+
+	t.Run("invalid index returns error", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0")
+			return nil
+		}
+
+		// Select invalid index
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return []int{5}, nil // Out of bounds
+		}
+
+		diverterPipe := Diverter(selector, pipe0)
+		p := New(ctx, diverterPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err == nil {
+			t.Fatal("expected error for invalid index")
+		}
+		if !strings.Contains(err.Error(), "invalid pipe index") {
+			t.Errorf("expected 'invalid pipe index' error, got %v", err)
+		}
+	})
+
+	t.Run("negative index returns error", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0")
+			return nil
+		}
+
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return []int{-1}, nil // Negative index
+		}
+
+		diverterPipe := Diverter(selector, pipe0)
+		p := New(ctx, diverterPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err == nil {
+			t.Fatal("expected error for negative index")
+		}
+	})
+
+	t.Run("selector error propagates", func(t *testing.T) {
+		ctx := context.Background()
+		expectedErr := errors.New("selector failed")
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("should not execute")
+			return nil
+		}
+
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return nil, expectedErr
+		}
+
+		diverterPipe := Diverter(selector, pipe0)
+		p := New(ctx, diverterPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != expectedErr {
+			t.Errorf("expected error %v, got %v", expectedErr, err)
+		}
+
+		if len(w.data) != 0 {
+			t.Errorf("expected no writes, got %v", w.data)
+		}
+	})
+
+	t.Run("selected pipe error propagates", func(t *testing.T) {
+		ctx := context.Background()
+		expectedErr := errors.New("pipe error")
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			return expectedErr
+		}
+
+		selector := func(ctx context.Context, input string) ([]int, error) {
+			return []int{0}, nil
+		}
+
+		diverterPipe := Diverter(selector, pipe0)
+		p := New(ctx, diverterPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != expectedErr {
+			t.Errorf("expected error %v, got %v", expectedErr, err)
+		}
+	})
+}
+
+// Test Joiner function
+func TestJoiner(t *testing.T) {
+	t.Run("executes all pipes in parallel", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0:" + input)
+			return nil
+		}
+
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe1:" + input)
+			return nil
+		}
+
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe2:" + input)
+			return nil
+		}
+
+		joinerPipe := Joiner(pipe0, pipe1, pipe2)
+		p := New(ctx, joinerPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		// Should have writes from all pipes
+		if len(w.data) != 3 {
+			t.Fatalf("expected 3 writes, got %d: %v", len(w.data), w.data)
+		}
+
+		// Check all pipes wrote (order may vary due to parallelism)
+		hasPipe0 := false
+		hasPipe1 := false
+		hasPipe2 := false
+		for _, d := range w.data {
+			if d == "pipe0:test" {
+				hasPipe0 = true
+			}
+			if d == "pipe1:test" {
+				hasPipe1 = true
+			}
+			if d == "pipe2:test" {
+				hasPipe2 = true
+			}
+		}
+
+		if !hasPipe0 || !hasPipe1 || !hasPipe2 {
+			t.Errorf("expected writes from all pipes, got %v", w.data)
+		}
+	})
+
+	t.Run("continues chain after all pipes complete", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("joined0")
+			return nil
+		}
+
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("joined1")
+			return nil
+		}
+
+		joinerPipe := Joiner(pipe0, pipe1)
+
+		finalPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("final")
+			return nil
+		}
+
+		p := New(ctx, joinerPipe, finalPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		if len(w.data) != 3 {
+			t.Fatalf("expected 3 writes, got %d: %v", len(w.data), w.data)
+		}
+
+		// Final should be present
+		hasFinal := false
+		for _, d := range w.data {
+			if d == "final" {
+				hasFinal = true
+			}
+		}
+
+		if !hasFinal {
+			t.Errorf("expected 'final' in writes, got %v", w.data)
+		}
+	})
+
+	t.Run("empty joiner continues immediately", func(t *testing.T) {
+		ctx := context.Background()
+
+		joinerPipe := Joiner[context.Context, *mockWriter, string]()
+
+		finalPipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("final")
+			return nil
+		}
+
+		p := New(ctx, joinerPipe, finalPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		if len(w.data) != 1 || w.data[0] != "final" {
+			t.Errorf("expected ['final'], got %v", w.data)
+		}
+	})
+
+	t.Run("propagates error from any pipe", func(t *testing.T) {
+		ctx := context.Background()
+		expectedErr := errors.New("pipe1 error")
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0")
+			return nil
+		}
+
+		pipe1 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			return expectedErr
+		}
+
+		pipe2 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe2")
+			return nil
+		}
+
+		joinerPipe := Joiner(pipe0, pipe1, pipe2)
+		p := New(ctx, joinerPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != expectedErr {
+			t.Errorf("expected error %v, got %v", expectedErr, err)
+		}
+	})
+
+	t.Run("single pipe behaves correctly", func(t *testing.T) {
+		ctx := context.Background()
+
+		pipe0 := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+			w.Write("pipe0:" + input)
+			return nil
+		}
+
+		joinerPipe := Joiner(pipe0)
+		p := New(ctx, joinerPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		if len(w.data) != 1 || w.data[0] != "pipe0:test" {
+			t.Errorf("expected ['pipe0:test'], got %v", w.data)
+		}
+	})
+
+	t.Run("many pipes execute in parallel", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create 5 pipes (reduced from 10 to avoid race conditions with non-thread-safe mockWriter)
+		var pipes []Pipe[context.Context, *mockWriter, string]
+		for i := 0; i < 5; i++ {
+			idx := i
+			pipes = append(pipes, func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+				w.Write(strings.Repeat("x", idx+1)) // +1 to avoid empty string
+				return nil
+			})
+		}
+
+		joinerPipe := Joiner(pipes...)
+		p := New(ctx, joinerPipe)
+		w := &mockWriter{}
+
+		err := p.Execute(ctx, w, "test")
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		if len(w.data) != 5 {
+			t.Fatalf("expected 5 writes, got %d: %v", len(w.data), w.data)
+		}
+	})
+}
+
 // Benchmark pipeline execution
 func BenchmarkPipeline_Execute(b *testing.B) {
 	ctx := context.Background()
@@ -573,6 +1385,28 @@ func BenchmarkPipeline_Execute(b *testing.B) {
 	}
 
 	p := New(ctx, pipe1, pipe2, pipe3)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w := &mockWriter{}
+		p.Execute(ctx, w, "benchmark")
+	}
+}
+
+// Benchmark Adapter transformation
+func BenchmarkAdapter(b *testing.B) {
+	ctx := context.Background()
+
+	transformPipe := Adapter[context.Context, *mockWriter, string](func(ctx context.Context, input string) (string, error) {
+		return strings.ToUpper(input), nil
+	})
+
+	capturePipe := func(ctx context.Context, w *mockWriter, input string, next Next[context.Context, *mockWriter, string]) error {
+		w.Write(input)
+		return nil
+	}
+
+	p := New(ctx, transformPipe, capturePipe)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

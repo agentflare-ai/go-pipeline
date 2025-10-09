@@ -18,7 +18,7 @@ Pipeline provides a flexible middleware pattern for chaining processing function
 ## Installation
 
 ```bash
-go get github.com/agentflare-ai/pipeline
+go get github.com/agentflare-ai/go-pipeline
 ```
 
 ## Quick Start
@@ -29,7 +29,7 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/agentflare-ai/pipeline"
+    "github.com/agentflare-ai/go-pipeline"
 )
 
 type Writer struct {
@@ -81,6 +81,49 @@ Each pipe receives:
 - `writer`: The writer instance to operate on (generic type `W`)
 - `input`: The input data to process (generic type `I`)
 - `next`: Function to invoke the next pipe in the chain
+
+### Adapter
+
+The `Adapter` function creates a pipe that transforms input data, similar to a TransformStream:
+
+```go
+func Adapter[C context.Context, W, I any](transform func(C, I) (I, error)) Pipe[C, W, I]
+```
+
+It simplifies input transformation by:
+- Applying a transformation function to the input
+- Passing the transformed result to the next pipe
+- Stopping the pipeline if the transformation returns an error
+
+### Wye
+
+The `Wye` function splits execution into two parallel branches:
+
+```go
+func Wye[C context.Context, W, I any](left, right Pipe[C, W, I]) Pipe[C, W, I]
+```
+
+Both branches receive the same input and execute concurrently. If either branch returns an error, execution stops.
+
+### Diverter
+
+The `Diverter` function conditionally selects one or more pipes to execute based on a selector function:
+
+```go
+func Diverter[C context.Context, W, I any](selector func(C, I) ([]int, error), pipes ...Pipe[C, W, I]) Pipe[C, W, I]
+```
+
+The selector receives the context and input, returning the indices of pipes to execute in parallel. If no pipes are selected, the chain continues immediately.
+
+### Joiner
+
+The `Joiner` function executes all provided pipes in parallel:
+
+```go
+func Joiner[C context.Context, W, I any](pipes ...Pipe[C, W, I]) Pipe[C, W, I]
+```
+
+All pipes receive the same input and execute concurrently. The chain continues only after all pipes complete successfully.
 
 ### Pipeline Execution
 
@@ -168,6 +211,176 @@ p := pipeline.New(ctx,
     },
     func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
         w.Write(input) // Receives transformed input
+        return nil
+    },
+)
+```
+
+### Using Adapter for Transformations
+
+The `Adapter` function provides a cleaner way to transform input:
+
+```go
+// Create transformation pipes
+uppercasePipe := pipeline.Adapter(func(ctx context.Context, input string) (string, error) {
+    return strings.ToUpper(input), nil
+})
+
+trimPipe := pipeline.Adapter(func(ctx context.Context, input string) (string, error) {
+    return strings.TrimSpace(input), nil
+})
+
+// Chain transformations
+p := pipeline.New(ctx,
+    trimPipe,
+    uppercasePipe,
+    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+        w.Write(input) // Receives trimmed and uppercased input
+        return nil
+    },
+)
+
+writer := &Writer{}
+p.Execute(ctx, writer, "  hello world  ")
+// Output: ["HELLO WORLD"]
+```
+
+Adapter works with any type:
+
+```go
+// Transform integers
+multiplyPipe := pipeline.Adapter(func(ctx context.Context, input int) (int, error) {
+    return input * 2, nil
+})
+
+addPipe := pipeline.Adapter(func(ctx context.Context, input int) (int, error) {
+    return input + 10, nil
+})
+
+p := pipeline.New(ctx, multiplyPipe, addPipe, processPipe)
+p.Execute(ctx, writer, 5) // Result: 20 (5 * 2 + 10)
+```
+
+### Using Wye for Parallel Processing
+
+The `Wye` function splits execution into parallel branches:
+
+```go
+// Create two independent processing branches
+logPipe := func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+    fmt.Println("Logging:", input)
+    return nil
+}
+
+metricsPipe := func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+    // Send metrics
+    recordMetric("input_length", len(input))
+    return nil
+}
+
+// Execute both in parallel
+wyePipe := pipeline.Wye(logPipe, metricsPipe)
+
+p := pipeline.New(ctx,
+    wyePipe,
+    // Continue after both branches complete
+    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+        w.Write("processed: " + input)
+        return nil
+    },
+)
+```
+
+### Using Diverter for Conditional Routing
+
+The `Diverter` function routes to different pipes based on input:
+
+```go
+// Define handlers for different request types
+handleGet := func(ctx context.Context, w *Writer, input Request, next func(context.Context, *Writer, Request) error) error {
+    w.Write("GET: " + input.Path)
+    return nil
+}
+
+handlePost := func(ctx context.Context, w *Writer, input Request, next func(context.Context, *Writer, Request) error) error {
+    w.Write("POST: " + input.Path)
+    return nil
+}
+
+handleDelete := func(ctx context.Context, w *Writer, input Request, next func(context.Context, *Writer, Request) error) error {
+    w.Write("DELETE: " + input.Path)
+    return nil
+}
+
+// Route based on HTTP method
+router := pipeline.Diverter(
+    func(ctx context.Context, input Request) ([]int, error) {
+        switch input.Method {
+        case "GET":
+            return []int{0}, nil
+        case "POST":
+            return []int{1}, nil
+        case "DELETE":
+            return []int{2}, nil
+        default:
+            return []int{}, nil // No handler selected
+        }
+    },
+    handleGet,
+    handlePost,
+    handleDelete,
+)
+
+p := pipeline.New(ctx, router)
+```
+
+You can also select multiple pipes to execute in parallel:
+
+```go
+// Select multiple handlers based on flags
+diverter := pipeline.Diverter(
+    func(ctx context.Context, input Request) ([]int, error) {
+        var handlers []int
+        if input.RequiresAuth { handlers = append(handlers, 0) }
+        if input.RequiresLogging { handlers = append(handlers, 1) }
+        if input.RequiresMetrics { handlers = append(handlers, 2) }
+        return handlers, nil
+    },
+    authPipe,
+    loggingPipe,
+    metricsPipe,
+)
+```
+
+### Using Joiner for Fan-Out Processing
+
+The `Joiner` function executes multiple pipes in parallel:
+
+```go
+// Create independent processing pipes
+notifyPipe := func(ctx context.Context, w *Writer, input Order, next func(context.Context, *Writer, Order) error) error {
+    sendNotification(input.CustomerID, "Order received")
+    return nil
+}
+
+inventoryPipe := func(ctx context.Context, w *Writer, input Order, next func(context.Context, *Writer, Order) error) error {
+    updateInventory(input.Items)
+    return nil
+}
+
+analyticsPipe := func(ctx context.Context, w *Writer, input Order, next func(context.Context, *Writer, Order) error) error {
+    recordOrderAnalytics(input)
+    return nil
+}
+
+// Execute all in parallel
+joiner := pipeline.Joiner(notifyPipe, inventoryPipe, analyticsPipe)
+
+p := pipeline.New(ctx,
+    joiner,
+    // Continue after all complete
+    func(ctx context.Context, w *Writer, input Order, next func(context.Context, *Writer, Order) error) error {
+        w.Write("Order processed: " + input.ID)
         return nil
     },
 )

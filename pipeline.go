@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"golang.org/x/sync/errgroup"
@@ -17,6 +18,12 @@ type Next[C context.Context, W, I any] func(C, W, I) error
 type Pipeline[C context.Context, W, I any] struct {
 	pipes    []Pipe[C, W, I]
 	fittings []Next[C, W, I] // Pre-built next functions
+}
+
+func Done[C context.Context, W, I any]() Next[C, W, I] {
+	return func(ctx C, writer W, input I) error {
+		return nil
+	}
 }
 
 // New creates a new pipeline with the given pipes.
@@ -59,10 +66,20 @@ func (p *Pipeline[C, W, I]) connect() {
 	}
 }
 
-// Execute runs the pipeline with the given writer and input.
+func (p *Pipeline[C, W, I]) Pipe(ctx C, writer W, input I, next Next[C, W, I]) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := p.Process(ctx, writer, input); err != nil {
+		return err
+	}
+	return next(ctx, writer, input)
+}
+
+// Process runs the pipeline with the given writer and input.
 // Storage is automatically provided in the context for sharing data between pipes.
 // If the context is cancelled, execution terminates and returns the context error.
-func (p *Pipeline[C, W, I]) Execute(ctx C, writer W, input I) error {
+func (p *Pipeline[C, W, I]) Process(ctx C, writer W, input I) error {
 	if len(p.pipes) == 0 {
 		return nil
 	}
@@ -79,6 +96,28 @@ func (p *Pipeline[C, W, I]) Execute(ctx C, writer W, input I) error {
 		slog.Error("pipeline execution failed", "error", err)
 	}
 	return err
+}
+
+// Deprecated: Use Process instead.
+func (p *Pipeline[C, W, I]) Execute(ctx C, writer W, input I) error {
+	return p.Process(ctx, writer, input)
+}
+
+// Adapter transforms the input before passing it to the next pipe.
+// It acts like a TransformStream, applying the transform function to the input
+// and passing the result down the pipeline chain.
+// If the transform returns an error, the pipeline stops and the error is returned.
+func Adapter[C context.Context, W, I any](transform func(C, I) (I, error)) Pipe[C, W, I] {
+	return func(ctx C, writer W, input I, next Next[C, W, I]) error {
+		// Apply transformation to the input
+		transformed, err := transform(ctx, input)
+		if err != nil {
+			return err
+		}
+
+		// Pass transformed input to the next pipe
+		return next(ctx, writer, transformed)
+	}
 }
 
 // Wye splits the pipeline into two parallel branches.
@@ -103,6 +142,81 @@ func Wye[C context.Context, W, I any](left, right Pipe[C, W, I]) Pipe[C, W, I] {
 		}
 
 		// Both branches succeeded, continue the chain
+		return next(ctx, writer, input)
+	}
+}
+
+// Diverter selects one or more pipes from multiple options based on a selector function.
+// The selector function receives the context and input, and returns the indices of the pipes to execute.
+// Selected pipes are executed in parallel, and all must complete before continuing.
+// If the selector returns an empty slice, the chain continues immediately.
+// If any selected pipe returns an error, execution stops and the error is returned.
+func Diverter[C context.Context, W, I any](selector func(C, I) ([]int, error), pipes ...Pipe[C, W, I]) Pipe[C, W, I] {
+	return func(ctx C, writer W, input I, next Next[C, W, I]) error {
+		// Call selector to determine which pipes to use
+		indices, err := selector(ctx, input)
+		if err != nil {
+			return err
+		}
+
+		// If no pipes selected, continue the chain
+		if len(indices) == 0 {
+			return next(ctx, writer, input)
+		}
+
+		// Validate all indices
+		for _, idx := range indices {
+			if idx < 0 || idx >= len(pipes) {
+				return fmt.Errorf("invalid pipe index %d, must be between 0 and %d", idx, len(pipes)-1)
+			}
+		}
+
+		// Execute selected pipes in parallel
+		g, _ := errgroup.WithContext(ctx)
+		for _, idx := range indices {
+			idx := idx // Capture for closure
+			g.Go(func() error {
+				return pipes[idx](ctx, writer, input, func(C, W, I) error { return nil })
+			})
+		}
+
+		// Wait for all selected pipes to complete
+		if err := g.Wait(); err != nil {
+			return err
+		}
+
+		// All selected pipes succeeded, continue the chain
+		return next(ctx, writer, input)
+	}
+}
+
+// Joiner executes multiple pipes in parallel and waits for all to complete.
+// All pipes receive the same writer and input, execute in parallel,
+// and all must complete before continuing the chain.
+// If any pipe returns an error, execution stops and the error is returned.
+// This is a generalized version of Wye for N pipes.
+func Joiner[C context.Context, W, I any](pipes ...Pipe[C, W, I]) Pipe[C, W, I] {
+	return func(ctx C, writer W, input I, next Next[C, W, I]) error {
+		// If no pipes provided, continue immediately
+		if len(pipes) == 0 {
+			return next(ctx, writer, input)
+		}
+
+		// Execute all pipes in parallel
+		g, _ := errgroup.WithContext(ctx)
+		for _, pipe := range pipes {
+			pipe := pipe // Capture for closure
+			g.Go(func() error {
+				return pipe(ctx, writer, input, func(C, W, I) error { return nil })
+			})
+		}
+
+		// Wait for all pipes to complete
+		if err := g.Wait(); err != nil {
+			return err
+		}
+
+		// All pipes succeeded, continue the chain
 		return next(ctx, writer, input)
 	}
 }
