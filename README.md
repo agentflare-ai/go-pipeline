@@ -8,12 +8,12 @@ Pipeline provides a flexible middleware pattern for chaining processing function
 
 ## Features
 
-- **Generic Types**: Type-safe pipeline with support for any context (`C`), writer (`W`), and input (`I`) types
-- **Context Cancellation**: Full support for context-based cancellation at any pipeline stage
-- **Storage Pooling**: Built-in sync.Pool for efficient storage management across executions
-- **Non-Recursive**: Pre-built next functions eliminate stack depth concerns
-- **Short-Circuiting**: Pipes can skip downstream processing by not calling `next()`
-- **Error Propagation**: Errors bubble up through the chain automatically
+* **Generic Types**: Type-safe pipeline with support for any context (`C`), writer (`W`), and input (`I`) types
+* **Context Cancellation**: Full support for context-based cancellation at any pipeline stage
+* **Storage Pooling**: Built-in sync.Pool for efficient storage management across executions
+* **Non-Recursive**: Pre-built next functions eliminate stack depth concerns
+* **Short-Circuiting**: Pipes can skip downstream processing by not calling `next()`
+* **Error Propagation**: Errors bubble up through the chain automatically
 
 ## Installation
 
@@ -77,23 +77,25 @@ type Pipe[C context.Context, W, I any] func(ctx C, writer W, input I, next func(
 ```
 
 Each pipe receives:
-- `ctx`: Context for cancellation and storage (generic type `C` must satisfy `context.Context`)
-- `writer`: The writer instance to operate on (generic type `W`)
-- `input`: The input data to process (generic type `I`)
-- `next`: Function to invoke the next pipe in the chain
 
-### Adapter
+* `ctx`: Context for cancellation and storage (generic type `C` must satisfy `context.Context`)
+* `writer`: The writer instance to operate on (generic type `W`)
+* `input`: The input data to process (generic type `I`)
+* `next`: Function to invoke the next pipe in the chain
 
-The `Adapter` function creates a pipe that transforms input data, similar to a TransformStream:
+### PipeAdapter
+
+The `PipeAdapter` helper creates a pipe that transforms input data, similar to a TransformStream:
 
 ```go
-func Adapter[C context.Context, W, I any](transform func(C, I) (I, error)) Pipe[C, W, I]
+func PipeAdapter[C context.Context, W, I any](transform func(C, I) (I, error)) Pipe[C, W, I]
 ```
 
 It simplifies input transformation by:
-- Applying a transformation function to the input
-- Passing the transformed result to the next pipe
-- Stopping the pipeline if the transformation returns an error
+
+* Applying a transformation function to the input
+* Passing the transformed result to the next pipe
+* Stopping the pipeline if the transformation returns an error
 
 ### Wye
 
@@ -128,6 +130,7 @@ All pipes receive the same input and execute concurrently. The chain continues o
 ### Pipeline Execution
 
 Pipes execute in order, with each pipe deciding whether to:
+
 1. **Continue the chain** by calling `next(ctx, writer, input)`
 2. **Short-circuit** by returning without calling `next()`
 3. **Transform data** before passing to `next()`
@@ -157,9 +160,10 @@ pipe2 := func(ctx context.Context, w *Writer, input string, next func(context.Co
 ```
 
 Storage is:
-- Automatically provided in the context during execution
-- Isolated between pipeline executions
-- Pooled for efficient memory usage
+
+* Automatically provided in the context during execution
+* Isolated between pipeline executions
+* Pooled for efficient memory usage
 
 ## Examples
 
@@ -216,17 +220,17 @@ p := pipeline.New(ctx,
 )
 ```
 
-### Using Adapter for Transformations
+### Using PipeAdapter for Transformations
 
-The `Adapter` function provides a cleaner way to transform input:
+The `PipeAdapter` helper provides a cleaner way to transform input:
 
 ```go
 // Create transformation pipes
-uppercasePipe := pipeline.Adapter(func(ctx context.Context, input string) (string, error) {
+uppercasePipe := pipeline.PipeAdapter(func(ctx context.Context, input string) (string, error) {
     return strings.ToUpper(input), nil
 })
 
-trimPipe := pipeline.Adapter(func(ctx context.Context, input string) (string, error) {
+trimPipe := pipeline.PipeAdapter(func(ctx context.Context, input string) (string, error) {
     return strings.TrimSpace(input), nil
 })
 
@@ -245,20 +249,62 @@ p.Execute(ctx, writer, "  hello world  ")
 // Output: ["HELLO WORLD"]
 ```
 
-Adapter works with any type:
+PipeAdapter works with any type:
 
 ```go
 // Transform integers
-multiplyPipe := pipeline.Adapter(func(ctx context.Context, input int) (int, error) {
+multiplyPipe := pipeline.PipeAdapter(func(ctx context.Context, input int) (int, error) {
     return input * 2, nil
 })
 
-addPipe := pipeline.Adapter(func(ctx context.Context, input int) (int, error) {
+addPipe := pipeline.PipeAdapter(func(ctx context.Context, input int) (int, error) {
     return input + 10, nil
 })
 
 p := pipeline.New(ctx, multiplyPipe, addPipe, processPipe)
 p.Execute(ctx, writer, 5) // Result: 20 (5 * 2 + 10)
+```
+
+### Adapt with Exchanger: Bridge Pipeline Types
+
+Use `Adapt` with an `Exchanger` when you need to reuse a pipe that was written for a different `[Context, Output, Input]` signature:
+
+```go
+intPipe := func(ctx context.Context, sink pipeline.Sink[int], input int, next pipeline.NextPipe[context.Context, int, int]) error {
+    if err := sink.Push(input + 1); err != nil {
+        return err
+    }
+    return next(ctx, sink, input+1)
+}
+
+type stringSink struct {
+    sink pipeline.Sink[string]
+}
+
+func (s *stringSink) Push(v int) error   { return s.sink.Push(strconv.Itoa(v)) }
+func (s *stringSink) Flush() error       { return s.sink.Flush() }
+func (s *stringSink) Close() error       { return s.sink.Close() }
+
+adapted := pipeline.Adapt(
+    intPipe,
+    pipeline.Exchanger[
+        context.Context, string, string,
+        context.Context, int, int,
+    ]{
+        Sink: func(ctx context.Context, sink pipeline.Sink[string], input string) (context.Context, pipeline.Sink[int], int, error) {
+            value, err := strconv.Atoi(input)
+            if err != nil {
+                return nil, nil, 0, err
+            }
+            return ctx, &stringSink{sink: sink}, value, nil
+        },
+        Source: func(outerCtx context.Context, outerSink pipeline.Sink[string], _ string, _ context.Context, _ pipeline.Sink[int], innerInput int) (context.Context, pipeline.Sink[string], string, error) {
+            return outerCtx, outerSink, strconv.Itoa(innerInput), nil
+        },
+    },
+)
+
+p := pipeline.New(ctx, adapted, finalPipe)
 ```
 
 ### Using Wye for Parallel Processing
@@ -412,12 +458,13 @@ err := p.Execute(writer, "test")
 
 Pipeline uses several optimizations:
 
-- **Pre-built next functions**: Constructed once during pipeline creation
-- **Storage pooling**: `sync.Pool` for storage maps reduces allocations
-- **Non-recursive**: Avoids stack depth issues with long chains
-- **Zero allocations** for empty pipelines
+* **Pre-built next functions**: Constructed once during pipeline creation
+* **Storage pooling**: `sync.Pool` for storage maps reduces allocations
+* **Non-recursive**: Avoids stack depth issues with long chains
+* **Zero allocations** for empty pipelines
 
 Benchmarks on a typical 3-pipe chain:
+
 ```
 BenchmarkPipeline_Execute-8    5000000    250 ns/op    0 allocs/op
 BenchmarkPipeline_Storage-8    3000000    420 ns/op    0 allocs/op
@@ -455,14 +502,15 @@ go test -bench=.
 ```
 
 The package includes comprehensive tests covering:
-- Basic pipeline creation and execution
-- Multiple pipe chaining
-- Short-circuiting behavior
-- Error propagation
-- Storage isolation
-- Context cancellation
-- Concurrent execution
-- Edge cases
+
+* Basic pipeline creation and execution
+* Multiple pipe chaining
+* Short-circuiting behavior
+* Error propagation
+* Storage isolation
+* Context cancellation
+* Concurrent execution
+* Edge cases
 
 ## License
 
@@ -471,18 +519,20 @@ See LICENSE file for details.
 ## Contributing
 
 Contributions are welcome! Please ensure:
-- All tests pass (`go test ./...`)
-- Code coverage remains above 90% (`go test -cover ./...`)
-- Code follows Go conventions
-- New features include tests
+
+* All tests pass (`go test ./...`)
+* Code coverage remains above 90% (`go test -cover ./...`)
+* Code follows Go conventions
+* New features include tests
 
 ## Use Cases
 
 Pipeline is ideal for:
-- HTTP middleware chains
-- Data processing pipelines
-- Event handling
-- Stream processing
-- Authentication/authorization flows
-- Request/response transformation
-- Logging and monitoring wrappers
+
+* HTTP middleware chains
+* Data processing pipelines
+* Event handling
+* Stream processing
+* Authentication/authorization flows
+* Request/response transformation
+* Logging and monitoring wrappers
