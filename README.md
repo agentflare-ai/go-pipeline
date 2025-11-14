@@ -4,11 +4,11 @@ A generic, type-safe middleware pipeline implementation for Go 1.24+ with contex
 
 ## Overview
 
-Pipeline provides a flexible middleware pattern for chaining processing functions together. It uses Go generics to provide type-safe operations on any writer and input types, with built-in context cancellation and shared storage between pipeline stages.
+Pipeline provides a flexible middleware pattern for chaining processing functions together. It uses Go generics to provide type-safe operations on any sink and input types, with built-in context cancellation and shared storage between pipeline stages.
 
 ## Features
 
-* **Generic Types**: Type-safe pipeline with support for any context (`C`), writer (`W`), and input (`I`) types
+* **Generic Types**: Type-safe pipeline with support for any context (`C`), sink (`O`), and input (`I`) types
 * **Context Cancellation**: Full support for context-based cancellation at any pipeline stage
 * **Storage Pooling**: Built-in sync.Pool for efficient storage management across executions
 * **Non-Recursive**: Pre-built next functions eliminate stack depth concerns
@@ -36,32 +36,37 @@ type Writer struct {
     data []string
 }
 
-func (w *Writer) Write(s string) {
+func (w *Writer) Push(s string) (int, error) {
     w.data = append(w.data, s)
+    return len(s), nil
+}
+
+func (w *Writer) Flush() error {
+    return nil
 }
 
 func main() {
     ctx := context.Background()
-    
+
     // Create pipeline with logging and processing pipes
     p := pipeline.New(ctx,
         // Logging pipe
-        func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+        func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
             fmt.Println("Processing:", input)
-            return next(ctx, w, input)
+            return next(ctx, sink, input)
         },
         // Processing pipe
-        func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-            w.Write("Processed: " + input)
-            return next(ctx, w, input)
+        func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+            sink.Push("Processed: " + input)
+            return next(ctx, sink, input)
         },
     )
-    
+
     writer := &Writer{}
-    if err := p.Execute(writer, "hello world"); err != nil {
+    if err := p.Process(writer, "hello world"); err != nil {
         panic(err)
     }
-    
+
     fmt.Println(writer.data) // ["Processed: hello world"]
 }
 ```
@@ -73,14 +78,14 @@ func main() {
 A `Pipe` is a middleware function with the signature:
 
 ```go
-type Pipe[C context.Context, W, I any] func(ctx C, writer W, input I, next func(C, W, I) error) error
+type Pipe[C context.Context, O, I any] func(ctx C, sink Sink[O], source I, next NextPipe[C, O, I]) error
 ```
 
 Each pipe receives:
 
 * `ctx`: Context for cancellation and storage (generic type `C` must satisfy `context.Context`)
-* `writer`: The writer instance to operate on (generic type `W`)
-* `input`: The input data to process (generic type `I`)
+* `sink`: The sink instance to operate on (generic type `O`)
+* `source`: The input data to process (generic type `I`)
 * `next`: Function to invoke the next pipe in the chain
 
 ### PipeAdapter
@@ -88,7 +93,7 @@ Each pipe receives:
 The `PipeAdapter` helper creates a pipe that transforms input data, similar to a TransformStream:
 
 ```go
-func PipeAdapter[C context.Context, W, I any](transform func(C, I) (I, error)) Pipe[C, W, I]
+func PipeAdapter[C context.Context, O, I any](transform func(C, I) (I, error)) Pipe[C, O, I]
 ```
 
 It simplifies input transformation by:
@@ -102,7 +107,7 @@ It simplifies input transformation by:
 The `Wye` function splits execution into two parallel branches:
 
 ```go
-func Wye[C context.Context, W, I any](left, right Pipe[C, W, I]) Pipe[C, W, I]
+func Wye[C context.Context, O, I any](left, right Pipe[C, O, I]) Pipe[C, O, I]
 ```
 
 Both branches receive the same input and execute concurrently. If either branch returns an error, execution stops.
@@ -112,7 +117,7 @@ Both branches receive the same input and execute concurrently. If either branch 
 The `Diverter` function conditionally selects one or more pipes to execute based on a selector function:
 
 ```go
-func Diverter[C context.Context, W, I any](selector func(C, I) ([]int, error), pipes ...Pipe[C, W, I]) Pipe[C, W, I]
+func Diverter[C context.Context, O, I any](selector func(C, I) ([]int, error), pipes ...Pipe[C, O, I]) Pipe[C, O, I]
 ```
 
 The selector receives the context and input, returning the indices of pipes to execute in parallel. If no pipes are selected, the chain continues immediately.
@@ -122,7 +127,7 @@ The selector receives the context and input, returning the indices of pipes to e
 The `Joiner` function executes all provided pipes in parallel:
 
 ```go
-func Joiner[C context.Context, W, I any](pipes ...Pipe[C, W, I]) Pipe[C, W, I]
+func Joiner[C context.Context, O, I any](pipes ...Pipe[C, O, I]) Pipe[C, O, I]
 ```
 
 All pipes receive the same input and execute concurrently. The chain continues only after all pipes complete successfully.
@@ -131,7 +136,7 @@ All pipes receive the same input and execute concurrently. The chain continues o
 
 Pipes execute in order, with each pipe deciding whether to:
 
-1. **Continue the chain** by calling `next(ctx, writer, input)`
+1. **Continue the chain** by calling `next(ctx, sink, input)`
 2. **Short-circuit** by returning without calling `next()`
 3. **Transform data** before passing to `next()`
 4. **Handle errors** from downstream pipes
@@ -238,14 +243,14 @@ trimPipe := pipeline.PipeAdapter(func(ctx context.Context, input string) (string
 p := pipeline.New(ctx,
     trimPipe,
     uppercasePipe,
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-        w.Write(input) // Receives trimmed and uppercased input
+    func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+        sink.Push(input) // Receives trimmed and uppercased input
         return nil
     },
 )
 
 writer := &Writer{}
-p.Execute(ctx, writer, "  hello world  ")
+p.Process(ctx, writer, "  hello world  ")
 // Output: ["HELLO WORLD"]
 ```
 
@@ -262,12 +267,12 @@ addPipe := pipeline.PipeAdapter(func(ctx context.Context, input int) (int, error
 })
 
 p := pipeline.New(ctx, multiplyPipe, addPipe, processPipe)
-p.Execute(ctx, writer, 5) // Result: 20 (5 * 2 + 10)
+p.Process(ctx, writer, 5) // Result: 20 (5 * 2 + 10)
 ```
 
-### Adapt with Exchanger: Bridge Pipeline Types
+### Exchange with Exchanger: Bridge Pipeline Types
 
-Use `Adapt` with an `Exchanger` when you need to reuse a pipe that was written for a different `[Context, Output, Input]` signature:
+Use `Exchange` with an `Exchanger` when you need to reuse a pipe that was written for a different `[Context, Output, Input]` signature:
 
 ```go
 intPipe := func(ctx context.Context, sink pipeline.Sink[int], input int, next pipeline.NextPipe[context.Context, int, int]) error {
@@ -285,7 +290,7 @@ func (s *stringSink) Push(v int) error   { return s.sink.Push(strconv.Itoa(v)) }
 func (s *stringSink) Flush() error       { return s.sink.Flush() }
 func (s *stringSink) Close() error       { return s.sink.Close() }
 
-adapted := pipeline.Adapt(
+exchanged := pipeline.Exchange(
     intPipe,
     pipeline.Exchanger[
         context.Context, string, string,
@@ -304,7 +309,7 @@ adapted := pipeline.Adapt(
     },
 )
 
-p := pipeline.New(ctx, adapted, finalPipe)
+p := pipeline.New(ctx, exchanged, finalPipe)
 ```
 
 ### Using Wye for Parallel Processing
@@ -438,19 +443,19 @@ p := pipeline.New(ctx,
 ctx, cancel := context.WithCancel(context.Background())
 
 p := pipeline.New(ctx,
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-        w.Write("started")
+    func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+        sink.Push("started")
         cancel() // Cancel context
-        return next(ctx, w, input)
+        return next(ctx, sink, input)
     },
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+    func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
         // Will not execute due to cancelled context
-        w.Write("should not execute")
+        sink.Push("should not execute")
         return nil
     },
 )
 
-err := p.Execute(writer, "test")
+err := p.Process(writer, "test")
 // err == context.Canceled
 ```
 

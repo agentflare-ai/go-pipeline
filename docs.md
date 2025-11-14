@@ -17,20 +17,20 @@ Create a pipeline with pipes that process data sequentially:
 
 ```
 // Define pipes that log and transform data
-logPipe := func(ctx context.Context, w io.Writer, input string, next func(context.Context, io.Writer, string) error) error {
-	fmt.Fprintf(w, "Processing: %s\n", input)
-	return next(ctx, w, input) // Continue to next pipe
+logPipe := func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+	sink.Push(fmt.Sprintf("Processing: %s\n", input))
+	return next(ctx, sink, input) // Continue to next pipe
 }
 
-uppercasePipe := func(ctx context.Context, w io.Writer, input string, next func(context.Context, io.Writer, string) error) error {
+uppercasePipe := func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
 	transformed := strings.ToUpper(input)
-	fmt.Fprintf(w, "Transformed: %s\n", transformed)
-	return next(ctx, w, transformed)
+	sink.Push(fmt.Sprintf("Transformed: %s\n", transformed))
+	return next(ctx, sink, transformed)
 }
 
 // Create and execute pipeline
 p := pipeline.New(context.Background(), logPipe, uppercasePipe)
-err := p.Execute(os.Stdout, "hello world")
+err := p.Process(os.Stdout, "hello world")
 ```
 
 # Using Storage
@@ -38,24 +38,24 @@ err := p.Execute(os.Stdout, "hello world")
 Share data between pipes using the storage mechanism:
 
 ```
-pipe1 := func(ctx context.Context, w io.Writer, input int, next func(context.Context, io.Writer, int) error) error {
+pipe1 := func(ctx context.Context, sink pipeline.Sink[string], input int, next pipeline.NextPipe[context.Context, string, int]) error {
 	// Store data for later pipes
 	pipeline.Store(ctx, "multiplier", 2)
-	return next(ctx, w, input)
+	return next(ctx, sink, input)
 }
 
-pipe2 := func(ctx context.Context, w io.Writer, input int, next func(context.Context, io.Writer, int) error) error {
+pipe2 := func(ctx context.Context, sink pipeline.Sink[string], input int, next pipeline.NextPipe[context.Context, string, int]) error {
 	// Load data from earlier pipe
 	multiplier, ok := pipeline.Load[int](ctx, "multiplier")
 	if ok {
 		input *= multiplier
 	}
-	fmt.Fprintf(w, "Result: %d\n", input)
-	return next(ctx, w, input)
+	sink.Push(fmt.Sprintf("Result: %d\n", input))
+	return next(ctx, sink, input)
 }
 
 p := pipeline.New(context.Background(), pipe1, pipe2)
-p.Execute(os.Stdout, 5) // Outputs: Result: 10
+p.Process(os.Stdout, 5) // Outputs: Result: 10
 ```
 
 # Short-Circuiting
@@ -63,11 +63,11 @@ p.Execute(os.Stdout, 5) // Outputs: Result: 10
 Pipes can stop execution by returning early without calling next():
 
 ```
-validationPipe := func(ctx context.Context, w io.Writer, input string, next func(context.Context, io.Writer, string) error) error {
+validationPipe := func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
 	if input == "" {
 		return fmt.Errorf("input cannot be empty")
 	}
-	return next(ctx, w, input) // Only continue if valid
+	return next(ctx, sink, input) // Only continue if valid
 }
 ```
 
@@ -80,7 +80,7 @@ ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
 p := pipeline.New(ctx, longRunningPipe1, longRunningPipe2)
-err := p.Execute(writer, input) // Returns ctx.Err() if timeout occurs
+err := p.Process(writer, input) // Returns ctx.Err() if timeout occurs
 ```
 
 # Utilities
@@ -102,7 +102,7 @@ p := pipeline.New(ctx, uppercasePipe, processPipe)
 PipeAdapter acts like a TransformStream, simplifying input transformation
 without needing to manually call next() with the transformed value.
 
-## Adapt
+## Exchange
 
 Bridge different pipeline type parameters by describing how to translate inputs
 and sinks in both directions:
@@ -123,7 +123,7 @@ func (s *stringSink) Push(v int) error   { return s.sink.Push(strconv.Itoa(v)) }
 func (s *stringSink) Flush() error       { return s.sink.Flush() }
 func (s *stringSink) Close() error       { return s.sink.Close() }
 
-adapted := pipeline.Adapt(
+exchanged := pipeline.Exchange(
     intPipe,
     pipeline.Exchanger[
         context.Context, string, string,
@@ -142,7 +142,7 @@ adapted := pipeline.Adapt(
     },
 )
 
-p := pipeline.New(ctx, adapted, finalPipe)
+p := pipeline.New(ctx, exchanged, finalPipe)
 ```
 
 Exchanger.Sink runs before the wrapped pipe executes, while Exchanger.Source
@@ -201,13 +201,13 @@ only after all pipes complete successfully. If any returns an error, execution s
 This is a generalized version of Wye for N pipes.
 
 var ErrStorageNotFound = errors.New("storage not found") ...
-func PipeAdapter\[C context.Context, W, I any]\(transform func(C, I) (I, error)) Pipe\[C, W, I]
-func Adapt\[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any]\(pipe Pipe\[C2, O2, I2], exchanger Exchanger\[C1, O1, I1, C2, O2, I2]) Pipe\[C1, O1, I1]
-func Diverter\[C context.Context, W, I any]\(selector func(C, I) (\[]int, error), pipes ...Pipe\[C, W, I]) Pipe\[C, W, I]
-func Joiner\[C context.Context, W, I any]\(pipes ...Pipe\[C, W, I]) Pipe\[C, W, I]
-func Wye\[C context.Context, W, I any]\(left, right Pipe\[C, W, I]) Pipe\[C, W, I]
+func PipeAdapter\[C context.Context, O, I any]\(transform func(C, I) (I, error)) Pipe\[C, O, I]
+func Exchange\[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any]\(pipe Pipe\[C2, O2, I2], exchanger Exchanger\[C1, O1, I1, C2, O2, I2]) Pipe\[C1, O1, I1]
+func Diverter\[C context.Context, O, I any]\(selector func(C, I) (\[]int, error), pipes ...Pipe\[C, O, I]) Pipe\[C, O, I]
+func Joiner\[C context.Context, O, I any]\(pipes ...Pipe\[C, O, I]) Pipe\[C, O, I]
+func Wye\[C context.Context, O, I any]\(left, right Pipe\[C, O, I]) Pipe\[C, O, I]
 func Load\[T any]\(ctx context.Context, key any) (T, bool)
 func Store\[T any]\(ctx context.Context, key any, value T) error
-type Pipe\[C context.Context, W, I any] func(ctx C, writer W, input I, next func(C, W, I) error) error
-type Pipeline\[C context.Context, W, I any] struct{ ... }
-func New\[C context.Context, W, I any]\(ctx C, pipes ...Pipe\[C, W, I]) \*Pipeline\[C, W, I]
+type Pipe\[C context.Context, O, I any] func(ctx C, sink Sink\[O], source I, next NextPipe\[C, O, I]) error
+type Pipeline\[C context.Context, O, I any] struct{ ... }
+func New\[C context.Context, O, I any]\(ctx C, pipes ...Pipe\[C, O, I]) \*Pipeline\[C, O, I]
