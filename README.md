@@ -1,17 +1,16 @@
-# Pipeline
+## Pipeline
 
-A generic, type-safe middleware pipeline implementation for Go 1.24+ with context support and storage pooling.
+A generic, type-safe middleware pipeline implementation for Go 1.24+ with context support and parallel composition helpers.
 
 ## Overview
 
-Pipeline provides a flexible middleware pattern for chaining processing functions together. It uses Go generics to provide type-safe operations on any sink and input types, with built-in context cancellation and shared storage between pipeline stages.
+Pipeline provides a flexible middleware pattern for chaining processing functions together. It uses Go generics to provide type-safe operations on any sink and input types, with built-in context cancellation.
 
 ## Features
 
 * **Generic Types**: Type-safe pipeline with support for any context (`C`), sink (`O`), and input (`I`) types
 * **Pipeline Composition**: Pipelines can be used as pipes in other pipelines via the `Pipe` method
 * **Context Cancellation**: Full support for context-based cancellation at any pipeline stage
-* **Storage Pooling**: Built-in sync.Pool for efficient storage management across executions
 * **Non-Recursive**: Pre-built next functions eliminate stack depth concerns
 * **Short-Circuiting**: Pipes can skip downstream processing by not calling `next()`
 * **Error Propagation**: Errors bubble up through the chain automatically
@@ -30,7 +29,8 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/agentflare-ai/go-pipeline"
+
+    pipeline "github.com/agentflare-ai/go-pipeline"
 )
 
 type Writer struct {
@@ -68,7 +68,7 @@ func main() {
     )
 
     writer := &Writer{}
-    if err := p.Process(writer, "hello world"); err != nil {
+    if err := p.Process(ctx, writer, "hello world"); err != nil {
         panic(err)
     }
 
@@ -88,7 +88,7 @@ type Pipe[C context.Context, O, I any] func(ctx C, sink O, source I, next NextPi
 
 Each pipe receives:
 
-* `ctx`: Context for cancellation and storage (generic type `C` must satisfy `context.Context`)
+* `ctx`: Context for cancellation (generic type `C` must satisfy `context.Context`)
 * `sink`: The sink instance to operate on (generic type `O`)
 * `source`: The input data to process (generic type `I`)
 * `next`: Function to invoke the next pipe in the chain
@@ -183,35 +183,6 @@ Pipes execute in order, with each pipe deciding whether to:
 2. **Short-circuit** by returning without calling `next()`
 3. **Transform data** before passing to `next()`
 4. **Handle errors** from downstream pipes
-
-### Storage
-
-Share data between pipes using the built-in storage:
-
-```go
-pipe1 := func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
-    // Store data
-    if err := pipeline.Store(ctx, "key", "value"); err != nil {
-        return err
-    }
-    return next(ctx, sink, input)
-}
-
-pipe2 := func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
-    // Load data
-    value, ok := pipeline.Load[string](ctx, "key")
-    if ok {
-        sink.Push(value)
-    }
-    return next(ctx, sink, input)
-}
-```
-
-Storage is:
-
-* Automatically provided in the context during execution
-* Isolated between pipeline executions
-* Pooled for efficient memory usage
 
 ## Examples
 
@@ -318,7 +289,19 @@ p.Process(ctx, writer, 5) // Result: 20 (5 * 2 + 10)
 Use `Exchange` with an `Exchanger` when you need to reuse a pipe that was written for a different `[Context, Output, Input]` signature:
 
 ```go
-intPipe := func(ctx context.Context, sink pipeline.Sink[int], input int, next pipeline.NextPipe[context.Context, int, int]) error {
+type IntSink interface {
+    Push(int) error
+    Flush() error
+    Close() error
+}
+
+type StringSink interface {
+    Push(string) error
+    Flush() error
+    Close() error
+}
+
+intPipe := func(ctx context.Context, sink IntSink, input int, next pipeline.NextPipe[context.Context, IntSink, int]) error {
     if err := sink.Push(input + 1); err != nil {
         return err
     }
@@ -326,7 +309,7 @@ intPipe := func(ctx context.Context, sink pipeline.Sink[int], input int, next pi
 }
 
 type stringSink struct {
-    sink pipeline.Sink[string]
+    sink StringSink
 }
 
 func (s *stringSink) Push(v int) error   { return s.sink.Push(strconv.Itoa(v)) }
@@ -336,17 +319,17 @@ func (s *stringSink) Close() error       { return s.sink.Close() }
 exchanged := pipeline.Exchange(
     intPipe,
     pipeline.Exchanger[
-        context.Context, string, string,
-        context.Context, int, int,
+        context.Context, StringSink, string,
+        context.Context, IntSink, int,
     ]{
-        Sink: func(ctx context.Context, sink pipeline.Sink[string], input string) (context.Context, pipeline.Sink[int], int, error) {
+        Sink: func(ctx context.Context, sink StringSink, input string) (context.Context, IntSink, int, error) {
             value, err := strconv.Atoi(input)
             if err != nil {
                 return nil, nil, 0, err
             }
             return ctx, &stringSink{sink: sink}, value, nil
         },
-        Source: func(outerCtx context.Context, outerSink pipeline.Sink[string], _ string, _ context.Context, _ pipeline.Sink[int], innerInput int) (context.Context, pipeline.Sink[string], string, error) {
+        Source: func(outerCtx context.Context, outerSink StringSink, _ string, _ context.Context, _ IntSink, innerInput int) (context.Context, StringSink, string, error) {
             return outerCtx, outerSink, strconv.Itoa(innerInput), nil
         },
     },
@@ -379,7 +362,7 @@ p := pipeline.New(ctx,
     wyePipe,
     // Continue after both branches complete
     func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-        w.Write("processed: " + input)
+        w.Push("processed: " + input)
         return nil
     },
 )
@@ -392,17 +375,17 @@ The `Diverter` function routes to different pipes based on input:
 ```go
 // Define handlers for different request types
 handleGet := func(ctx context.Context, w *Writer, input Request, next func(context.Context, *Writer, Request) error) error {
-    w.Write("GET: " + input.Path)
+    w.Push("GET: " + input.Path)
     return nil
 }
 
 handlePost := func(ctx context.Context, w *Writer, input Request, next func(context.Context, *Writer, Request) error) error {
-    w.Write("POST: " + input.Path)
+    w.Push("POST: " + input.Path)
     return nil
 }
 
 handleDelete := func(ctx context.Context, w *Writer, input Request, next func(context.Context, *Writer, Request) error) error {
-    w.Write("DELETE: " + input.Path)
+    w.Push("DELETE: " + input.Path)
     return nil
 }
 
@@ -474,7 +457,7 @@ p := pipeline.New(ctx,
     joiner,
     // Continue after all complete
     func(ctx context.Context, w *Writer, input Order, next func(context.Context, *Writer, Order) error) error {
-        w.Write("Order processed: " + input.ID)
+        w.Push("Order processed: " + input.ID)
         return nil
     },
 )
@@ -486,19 +469,19 @@ p := pipeline.New(ctx,
 ctx, cancel := context.WithCancel(context.Background())
 
 p := pipeline.New(ctx,
-    func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
         sink.Push("started")
         cancel() // Cancel context
         return next(ctx, sink, input)
     },
-    func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
         // Will not execute due to cancelled context
         sink.Push("should not execute")
         return nil
     },
 )
 
-err := p.Process(writer, "test")
+err := p.Process(ctx, writer, "test")
 // err == context.Canceled
 ```
 
@@ -507,15 +490,13 @@ err := p.Process(writer, "test")
 Pipeline uses several optimizations:
 
 * **Pre-built next functions**: Constructed once during pipeline creation
-* **Storage pooling**: `sync.Pool` for storage maps reduces allocations
 * **Non-recursive**: Avoids stack depth issues with long chains
 * **Zero allocations** for empty pipelines
 
-Benchmarks on a typical 3-pipe chain:
+You can run benchmarks for your environment with:
 
-```
-BenchmarkPipeline_Execute-8    5000000    250 ns/op    0 allocs/op
-BenchmarkPipeline_Storage-8    3000000    420 ns/op    0 allocs/op
+```bash
+go test -bench=.
 ```
 
 ## Error Handling
@@ -555,7 +536,6 @@ The package includes comprehensive tests covering:
 * Multiple pipe chaining
 * Short-circuiting behavior
 * Error propagation
-* Storage isolation
 * Context cancellation
 * Concurrent execution
 * Edge cases
