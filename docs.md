@@ -17,14 +17,14 @@ Create a pipeline with pipes that process data sequentially:
 
 ```
 // Define pipes that log and transform data
-logPipe := func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
-	sink.Push(fmt.Sprintf("Processing: %s\n", input))
+logPipe := func(ctx context.Context, sink *os.File, input string, next func(context.Context, *os.File, string) error) error {
+	fmt.Fprintf(sink, "Processing: %s\n", input)
 	return next(ctx, sink, input) // Continue to next pipe
 }
 
-uppercasePipe := func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+uppercasePipe := func(ctx context.Context, sink *os.File, input string, next func(context.Context, *os.File, string) error) error {
 	transformed := strings.ToUpper(input)
-	sink.Push(fmt.Sprintf("Transformed: %s\n", transformed))
+	fmt.Fprintf(sink, "Transformed: %s\n", transformed)
 	return next(ctx, sink, transformed)
 }
 
@@ -38,13 +38,13 @@ err := p.Process(os.Stdout, "hello world")
 Share data between pipes using the storage mechanism:
 
 ```
-pipe1 := func(ctx context.Context, sink pipeline.Sink[string], input int, next pipeline.NextPipe[context.Context, string, int]) error {
+pipe1 := func(ctx context.Context, sink *os.File, input int, next func(context.Context, *os.File, int) error) error {
 	// Store data for later pipes
 	pipeline.Store(ctx, "multiplier", 2)
 	return next(ctx, sink, input)
 }
 
-pipe2 := func(ctx context.Context, sink pipeline.Sink[string], input int, next pipeline.NextPipe[context.Context, string, int]) error {
+pipe2 := func(ctx context.Context, sink *os.File, input int, next func(context.Context, *os.File, int) error) error {
 	// Load data from earlier pipe
 	multiplier, ok := pipeline.Load[int](ctx, "multiplier")
 	if ok {
@@ -200,6 +200,44 @@ All pipes receive the same input and execute concurrently. The pipeline continue
 only after all pipes complete successfully. If any returns an error, execution stops.
 This is a generalized version of Wye for N pipes.
 
+## Pipeline Composition
+
+Pipelines can be used as pipes in other pipelines via the `Pipe` method:
+
+```
+func (p *Pipeline[C, O, I]) Pipe(ctx C, sink O, input I, next NextPipe[C, O, I]) error
+```
+
+This allows you to compose complex pipeline hierarchies:
+
+```go
+// Create a sub-pipeline for validation
+validator := pipeline.New(ctx,
+    validateInputPipe,
+    sanitizeInputPipe,
+)
+
+// Create a sub-pipeline for processing
+processor := pipeline.New(ctx,
+    transformPipe,
+    enrichPipe,
+)
+
+// Use pipelines as pipes in a main pipeline
+mainPipeline := pipeline.New(ctx,
+    validator.Pipe,  // Pipeline as a pipe
+    processor.Pipe,  // Another pipeline as a pipe
+    finalizePipe,
+)
+```
+
+The `Pipe` method:
+
+* Executes the entire pipeline with the provided sink and input
+* Returns any errors from pipeline execution
+* Calls the `next` function after successful pipeline completion
+* Respects context cancellation
+
 var ErrStorageNotFound = errors.New("storage not found") ...
 func PipeAdapter\[C context.Context, O, I any]\(transform func(C, I) (I, error)) Pipe\[C, O, I]
 func Exchange\[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any]\(pipe Pipe\[C2, O2, I2], exchanger Exchanger\[C1, O1, I1, C2, O2, I2]) Pipe\[C1, O1, I1]
@@ -208,6 +246,7 @@ func Joiner\[C context.Context, O, I any]\(pipes ...Pipe\[C, O, I]) Pipe\[C, O, 
 func Wye\[C context.Context, O, I any]\(left, right Pipe\[C, O, I]) Pipe\[C, O, I]
 func Load\[T any]\(ctx context.Context, key any) (T, bool)
 func Store\[T any]\(ctx context.Context, key any, value T) error
-type Pipe\[C context.Context, O, I any] func(ctx C, sink Sink\[O], source I, next NextPipe\[C, O, I]) error
+func (p \*Pipeline\[C, O, I]) Pipe(ctx C, sink O, input I, next NextPipe\[C, O, I]) error
+type Pipe\[C context.Context, O, I any] func(ctx C, sink O, source I, next NextPipe\[C, O, I]) error
 type Pipeline\[C context.Context, O, I any] struct{ ... }
 func New\[C context.Context, O, I any]\(ctx C, pipes ...Pipe\[C, O, I]) \*Pipeline\[C, O, I]

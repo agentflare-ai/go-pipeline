@@ -11,33 +11,8 @@ import (
 // Pipe is a middleware function that processes sink and source.
 // It receives a next function that invokes the next pipe in the chain.
 // The pipe can call next(ctx, sink, source) to continue the chain, or return early to short-circuit.
-type Pipe[C context.Context, O, I any] func(ctx C, sink Sink[O], source I, next NextPipe[C, O, I]) error
-type NextPipe[C context.Context, O, I any] func(C, Sink[O], I) error
-
-type Sink[T any] interface {
-	Flush() error
-	Push(T) (int, error)
-}
-
-type sink[T any] struct {
-	push  func(T) (int, error)
-	flush func() error
-}
-
-func NewSink[T any](push func(T) (int, error), flush func() error) Sink[T] {
-	return &sink[T]{
-		push:  push,
-		flush: flush,
-	}
-}
-
-func (s *sink[T]) Flush() error {
-	return s.flush()
-}
-
-func (s *sink[T]) Push(v T) (int, error) {
-	return s.push(v)
-}
+type Pipe[C context.Context, O any, I any] func(ctx C, sink O, source I, next NextPipe[C, O, I]) error
+type NextPipe[C context.Context, O any, I any] func(C, O, I) error
 
 var (
 	// ErrAdaptNilPipe indicates that Adapt was asked to wrap a nil pipe.
@@ -49,13 +24,13 @@ var (
 )
 
 // Pipeline chains multiple pipes together in a non-recursive middleware pattern.
-type Pipeline[C context.Context, O, I any] struct {
+type Pipeline[C context.Context, O any, I any] struct {
 	pipes       []Pipe[C, O, I]
 	connections []NextPipe[C, O, I] // Pre-built next functions
 }
 
-func End[C context.Context, O, I any]() NextPipe[C, O, I] {
-	return func(ctx C, drain Sink[O], input I) error {
+func End[C context.Context, O any, I any]() NextPipe[C, O, I] {
+	return func(ctx C, drain O, input I) error {
 		return nil
 	}
 }
@@ -63,7 +38,7 @@ func End[C context.Context, O, I any]() NextPipe[C, O, I] {
 // New creates a new pipeline with the given pipes.
 // Pipes are executed in order: pipe1 -> pipe2 -> pipe3 -> ...
 // Next functions are pre-built for efficiency.
-func New[C context.Context, O, I any](ctx C, pipes ...Pipe[C, O, I]) *Pipeline[C, O, I] {
+func New[C context.Context, O any, I any](ctx C, pipes ...Pipe[C, O, I]) *Pipeline[C, O, I] {
 	p := &Pipeline[C, O, I]{
 		pipes: pipes,
 	}
@@ -82,7 +57,7 @@ func (p *Pipeline[C, O, I]) connect() {
 	p.connections = make([]NextPipe[C, O, I], len(p.pipes))
 
 	// Terminal next function (does nothing, chain complete)
-	p.connections[len(p.pipes)-1] = func(ctx C, sink Sink[O], input I) error {
+	p.connections[len(p.pipes)-1] = func(ctx C, sink O, input I) error {
 		return nil
 	}
 
@@ -90,7 +65,7 @@ func (p *Pipeline[C, O, I]) connect() {
 	for i := len(p.pipes) - 2; i >= 0; i-- {
 		// Capture variables for closure
 		nextIdx := i + 1
-		p.connections[i] = func(ctx C, sink Sink[O], input I) error {
+		p.connections[i] = func(ctx C, sink O, input I) error {
 			// Check if context is cancelled before proceeding
 			if err := ctx.Err(); err != nil {
 				return err
@@ -100,7 +75,7 @@ func (p *Pipeline[C, O, I]) connect() {
 	}
 }
 
-func (p *Pipeline[C, O, I]) Pipe(ctx C, sink Sink[O], input I, next NextPipe[C, O, I]) error {
+func (p *Pipeline[C, O, I]) Pipe(ctx C, sink O, input I, next NextPipe[C, O, I]) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -113,7 +88,7 @@ func (p *Pipeline[C, O, I]) Pipe(ctx C, sink Sink[O], input I, next NextPipe[C, 
 // Process runs the pipeline with the given writer and input.
 // Storage is automatically provided in the context for sharing data between pipes.
 // If the context is cancelled, execution terminates and returns the context error.
-func (p *Pipeline[C, O, I]) Process(ctx C, sink Sink[O], input I) error {
+func (p *Pipeline[C, O, I]) Process(ctx C, sink O, input I) error {
 	if len(p.pipes) == 0 {
 		return nil
 	}
@@ -129,7 +104,7 @@ func (p *Pipeline[C, O, I]) Process(ctx C, sink Sink[O], input I) error {
 }
 
 // Deprecated: Use Process instead.
-func (p *Pipeline[C, O, I]) Execute(ctx C, sink Sink[O], input I) error {
+func (p *Pipeline[C, O, I]) Execute(ctx C, sink O, input I) error {
 	return p.Process(ctx, sink, input)
 }
 
@@ -137,8 +112,8 @@ func (p *Pipeline[C, O, I]) Execute(ctx C, sink Sink[O], input I) error {
 // It acts like a TransformStream, applying the transform function to the input
 // and passing the result down the pipeline chain.
 // If the transform returns an error, the pipeline stops and the error is returned.
-func PipeAdapter[C context.Context, O, I any](transform func(C, I) (I, error)) Pipe[C, O, I] {
-	return func(ctx C, sink Sink[O], input I, next NextPipe[C, O, I]) error {
+func PipeAdapter[C context.Context, O any, I any](transform func(C, I) (I, error)) Pipe[C, O, I] {
+	return func(ctx C, sink O, input I, next NextPipe[C, O, I]) error {
 		// Apply transformation to the input
 		transformed, err := transform(ctx, input)
 		if err != nil {
@@ -154,22 +129,22 @@ func PipeAdapter[C context.Context, O, I any](transform func(C, I) (I, error)) P
 // and the inner pipe types [C2, O2, I2]. Sink is invoked before the wrapped pipe executes
 // to project the outer sink/input into the inner types. Source is invoked every time the
 // wrapped pipe calls its next function so the outer chain receives mapped arguments.
-type Exchanger[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any] struct {
-	Sink   func(ctx C1, sink Sink[O1], input I1) (C2, Sink[O2], I2, error)
+type Exchanger[C1 context.Context, O1 any, I1 any, C2 context.Context, O2 any, I2 any] struct {
+	Sink   func(ctx C1, sink O1, input I1) (C2, O2, I2, error)
 	Source func(
 		outerCtx C1,
-		outerSink Sink[O1],
+		outerSink O1,
 		outerInput I1,
 		innerCtx C2,
-		innerSink Sink[O2],
+		innerSink O2,
 		innerInput I2,
-	) (C1, Sink[O1], I1, error)
+	) (C1, O1, I1, error)
 }
 
 // Exchange converts a pipe defined for [C2, O2, I2] into a pipe that can participate in a pipeline
 // operating with [C1, O1, I1]. It relies on an Exchanger to translate arguments in both directions.
 // If the configuration is invalid, the returned pipe always fails with the corresponding error.
-func Exchange[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any](
+func Exchange[C1 context.Context, O1 any, I1 any, C2 context.Context, O2 any, I2 any](
 	pipe Pipe[C2, O2, I2],
 	exchanger Exchanger[C1, O1, I1, C2, O2, I2],
 ) Pipe[C1, O1, I1] {
@@ -184,12 +159,12 @@ func Exchange[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any](
 	}
 
 	if configErr != nil {
-		return func(C1, Sink[O1], I1, NextPipe[C1, O1, I1]) error {
+		return func(C1, O1, I1, NextPipe[C1, O1, I1]) error {
 			return configErr
 		}
 	}
 
-	return func(ctx C1, sink Sink[O1], input I1, next NextPipe[C1, O1, I1]) error {
+	return func(ctx C1, sink O1, input I1, next NextPipe[C1, O1, I1]) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -199,7 +174,7 @@ func Exchange[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any](
 			return err
 		}
 
-		innerNext := func(c C2, s Sink[O2], i I2) error {
+		innerNext := func(c C2, s O2, i I2) error {
 			outerCtx, outerSink, outerInput, mapErr := exchanger.Source(ctx, sink, input, c, s, i)
 			if mapErr != nil {
 				return mapErr
@@ -215,8 +190,8 @@ func Exchange[C1 context.Context, O1, I1 any, C2 context.Context, O2, I2 any](
 // Both left and right pipes receive the same writer and input,
 // execute in parallel, and both must complete before continuing.
 // If either branch returns an error, execution stops and the error is returned.
-func Wye[C context.Context, O, I any](left, right Pipe[C, O, I]) Pipe[C, O, I] {
-	return func(ctx C, sink Sink[O], input I, next NextPipe[C, O, I]) error {
+func Wye[C context.Context, O any, I any](left, right Pipe[C, O, I]) Pipe[C, O, I] {
+	return func(ctx C, sink O, input I, next NextPipe[C, O, I]) error {
 		g, _ := errgroup.WithContext(ctx)
 
 		g.Go(func() error {
@@ -242,8 +217,8 @@ func Wye[C context.Context, O, I any](left, right Pipe[C, O, I]) Pipe[C, O, I] {
 // Selected pipes are executed in parallel, and all must complete before continuing.
 // If the selector returns an empty slice, the chain continues immediately.
 // If any selected pipe returns an error, execution stops and the error is returned.
-func Diverter[C context.Context, O, I any](selector func(C, I) ([]int, error), pipes ...Pipe[C, O, I]) Pipe[C, O, I] {
-	return func(ctx C, sink Sink[O], input I, next NextPipe[C, O, I]) error {
+func Diverter[C context.Context, O any, I any](selector func(C, I) ([]int, error), pipes ...Pipe[C, O, I]) Pipe[C, O, I] {
+	return func(ctx C, sink O, input I, next NextPipe[C, O, I]) error {
 		// Call selector to determine which pipes to use
 		indices, err := selector(ctx, input)
 		if err != nil {
@@ -286,8 +261,8 @@ func Diverter[C context.Context, O, I any](selector func(C, I) ([]int, error), p
 // and all must complete before continuing the chain.
 // If any pipe returns an error, execution stops and the error is returned.
 // This is a generalized version of Wye for N pipes.
-func Joiner[C context.Context, O, I any](pipes ...Pipe[C, O, I]) Pipe[C, O, I] {
-	return func(ctx C, sink Sink[O], input I, next NextPipe[C, O, I]) error {
+func Joiner[C context.Context, O any, I any](pipes ...Pipe[C, O, I]) Pipe[C, O, I] {
+	return func(ctx C, sink O, input I, next NextPipe[C, O, I]) error {
 		// If no pipes provided, continue immediately
 		if len(pipes) == 0 {
 			return next(ctx, sink, input)

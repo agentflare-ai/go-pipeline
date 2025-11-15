@@ -9,6 +9,7 @@ Pipeline provides a flexible middleware pattern for chaining processing function
 ## Features
 
 * **Generic Types**: Type-safe pipeline with support for any context (`C`), sink (`O`), and input (`I`) types
+* **Pipeline Composition**: Pipelines can be used as pipes in other pipelines via the `Pipe` method
 * **Context Cancellation**: Full support for context-based cancellation at any pipeline stage
 * **Storage Pooling**: Built-in sync.Pool for efficient storage management across executions
 * **Non-Recursive**: Pre-built next functions eliminate stack depth concerns
@@ -45,18 +46,22 @@ func (w *Writer) Flush() error {
     return nil
 }
 
+func (w *Writer) Close() error {
+    return nil
+}
+
 func main() {
     ctx := context.Background()
 
     // Create pipeline with logging and processing pipes
     p := pipeline.New(ctx,
         // Logging pipe
-        func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+        func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
             fmt.Println("Processing:", input)
             return next(ctx, sink, input)
         },
         // Processing pipe
-        func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+        func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
             sink.Push("Processed: " + input)
             return next(ctx, sink, input)
         },
@@ -78,7 +83,7 @@ func main() {
 A `Pipe` is a middleware function with the signature:
 
 ```go
-type Pipe[C context.Context, O, I any] func(ctx C, sink Sink[O], source I, next NextPipe[C, O, I]) error
+type Pipe[C context.Context, O, I any] func(ctx C, sink O, source I, next NextPipe[C, O, I]) error
 ```
 
 Each pipe receives:
@@ -132,6 +137,44 @@ func Joiner[C context.Context, O, I any](pipes ...Pipe[C, O, I]) Pipe[C, O, I]
 
 All pipes receive the same input and execute concurrently. The chain continues only after all pipes complete successfully.
 
+### Pipeline Composition with Pipe Method
+
+Pipelines can be used as pipes in other pipelines via the `Pipe` method:
+
+```go
+func (p *Pipeline[C, O, I]) Pipe(ctx C, sink O, input I, next NextPipe[C, O, I]) error
+```
+
+This allows you to compose complex pipeline hierarchies:
+
+```go
+// Create a sub-pipeline for validation
+validator := pipeline.New(ctx,
+    validateInputPipe,
+    sanitizeInputPipe,
+)
+
+// Create a sub-pipeline for processing
+processor := pipeline.New(ctx,
+    transformPipe,
+    enrichPipe,
+)
+
+// Use pipelines as pipes in a main pipeline
+mainPipeline := pipeline.New(ctx,
+    validator.Pipe,  // Pipeline as a pipe
+    processor.Pipe,  // Another pipeline as a pipe
+    finalizePipe,
+)
+```
+
+The `Pipe` method:
+
+* Executes the entire pipeline with the provided sink and input
+* Returns any errors from pipeline execution
+* Calls the `next` function after successful pipeline completion
+* Respects context cancellation
+
 ### Pipeline Execution
 
 Pipes execute in order, with each pipe deciding whether to:
@@ -146,21 +189,21 @@ Pipes execute in order, with each pipe deciding whether to:
 Share data between pipes using the built-in storage:
 
 ```go
-pipe1 := func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+pipe1 := func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
     // Store data
     if err := pipeline.Store(ctx, "key", "value"); err != nil {
         return err
     }
-    return next(ctx, w, input)
+    return next(ctx, sink, input)
 }
 
-pipe2 := func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+pipe2 := func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
     // Load data
     value, ok := pipeline.Load[string](ctx, "key")
     if ok {
-        w.Write(value)
+        sink.Push(value)
     }
-    return next(ctx, w, input)
+    return next(ctx, sink, input)
 }
 ```
 
@@ -176,14 +219,14 @@ Storage is:
 
 ```go
 p := pipeline.New(ctx,
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-        w.Write("before")
-        err := next(ctx, w, input)
-        w.Write("after")
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
+        sink.Push("before")
+        err := next(ctx, sink, input)
+        sink.Push("after")
         return err
     },
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-        w.Write("middle")
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
+        sink.Push("middle")
         return nil
     },
 )
@@ -194,16 +237,16 @@ p := pipeline.New(ctx,
 ### Short-Circuit
 
 ```go
-authPipe := func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+authPipe := func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
     if !isAuthenticated(input) {
         return errors.New("unauthorized")
     }
-    return next(ctx, w, input)
+    return next(ctx, sink, input)
 }
 
-processPipe := func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+processPipe := func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
     // Only executes if authPipe calls next()
-    w.Write("processing " + input)
+    sink.Push("processing " + input)
     return nil
 }
 
@@ -214,12 +257,12 @@ p := pipeline.New(ctx, authPipe, processPipe)
 
 ```go
 p := pipeline.New(ctx,
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
         // Transform and pass modified input
-        return next(ctx, w, strings.ToUpper(input))
+        return next(ctx, sink, strings.ToUpper(input))
     },
-    func(ctx context.Context, w *Writer, input string, next func(context.Context, *Writer, string) error) error {
-        w.Write(input) // Receives transformed input
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
+        sink.Push(input) // Receives transformed input
         return nil
     },
 )
@@ -243,7 +286,7 @@ trimPipe := pipeline.PipeAdapter(func(ctx context.Context, input string) (string
 p := pipeline.New(ctx,
     trimPipe,
     uppercasePipe,
-    func(ctx context.Context, sink pipeline.Sink[string], input string, next pipeline.NextPipe[context.Context, string, string]) error {
+    func(ctx context.Context, sink *Writer, input string, next func(context.Context, *Writer, string) error) error {
         sink.Push(input) // Receives trimmed and uppercased input
         return nil
     },
